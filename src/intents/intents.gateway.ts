@@ -9,6 +9,12 @@ import { verifyStellarSignature, buildWsAuthMessage } from "../common/stellar-si
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 
+/** Read WS_HEARTBEAT_INTERVAL_MS from the environment, falling back to 30 s. */
+function resolveHeartbeatIntervalMs(): number {
+  const parsed = Number(process.env.WS_HEARTBEAT_INTERVAL_MS);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : HEARTBEAT_INTERVAL_MS;
+}
+
 /**
  * How many sequenced events to keep in the replay buffer.
  *
@@ -103,6 +109,12 @@ export class IntentsGateway
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private heartbeatTimer: any;
   private nextSeq = 1;
+
+  /** Configured heartbeat interval in milliseconds (default 30 000). */
+  public readonly heartbeatIntervalMs: number;
+
+  /** Number of connections terminated in the most recent heartbeat cycle. */
+  private lastHeartbeatTerminatedCount = 0;
   private readonly backplane: null | {
     publish: (event: Record<string, unknown>) => void;
     subscribe: (handler: (event: Record<string, unknown>) => void) => void;
@@ -115,7 +127,8 @@ export class IntentsGateway
     private readonly intentsService: IntentsService,
     private readonly solversService: SolversService,
   ) {
-    this.heartbeatTimer = setInterval(() => this.heartbeat(), HEARTBEAT_INTERVAL_MS);
+    this.heartbeatIntervalMs = resolveHeartbeatIntervalMs();
+    this.heartbeatTimer = setInterval(() => this.heartbeat(), this.heartbeatIntervalMs);
     this.backplane = this.createBackplane();
     if (this.backplane) {
       this.backplane.subscribe((event) => {
@@ -552,13 +565,12 @@ export class IntentsGateway
   }
 
   private heartbeat() {
+    let terminated = 0;
     for (const [client] of this.subscribers) {
       if (this.alive.get(client) === false) {
         client.terminate();
         this.subscribers.delete(client);
-        logger.debug(
-          `ws heartbeat terminated dead client (subscribers=${this.subscribers.size})`,
-        );
+        terminated++;
         continue;
       }
 
@@ -567,6 +579,32 @@ export class IntentsGateway
         client.ping();
       }
     }
+    this.lastHeartbeatTerminatedCount = terminated;
+    if (terminated > 0) {
+      logger.debug(
+        `ws heartbeat terminated ${terminated} dead client(s) (subscribers=${this.subscribers.size})`,
+      );
+    }
+  }
+
+  /**
+   * Returns the number of connections terminated in the most recent
+   * heartbeat cycle. Useful for presence stats and observability.
+   */
+  getLastTerminatedCount(): number {
+    return this.lastHeartbeatTerminatedCount;
+  }
+
+  /**
+   * Returns the number of connections that missed the last ping and are
+   * waiting to be terminated in the next heartbeat cycle ("zombies").
+   */
+  getZombieCount(): number {
+    let count = 0;
+    for (const client of this.subscribers.keys()) {
+      if (this.alive.get(client) === false) count++;
+    }
+    return count;
   }
 
   onModuleDestroy() {

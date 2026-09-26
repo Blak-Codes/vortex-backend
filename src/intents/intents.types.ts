@@ -40,12 +40,31 @@ export interface IntentAuditEntry {
  * `IntentState` is derived from this tuple so DTO validators (`@IsIn`),
  * Swagger `enum:` annotations, and type-checking all stay in sync
  * automatically — mirrors how `SUPPORTED_CHAINS` is defined above (issue #270).
+ *
+ * Issue #385 — pending_ states represent submitted-but-unconfirmed on-chain
+ * writes.  Each active state gains a corresponding pending twin:
+ *   open          ← confirmed creation on-chain
+ *   pending_open  ← create_intent tx submitted, awaiting ledger confirmation
+ *   accepted      ← confirmed accept on-chain
+ *   pending_accepted ← accept tx submitted, awaiting confirmation
+ *   filled        ← confirmed fill on-chain
+ *   pending_filled   ← fill tx submitted, awaiting confirmation
+ *   cancelled     ← confirmed cancel on-chain
+ *   pending_cancelled ← cancel tx submitted, awaiting confirmation
+ *
+ * The pending states are NOT terminal and are excluded from eviction sweeps.
+ * They are only used when ONCHAIN_INTENTS_ENABLED=true; the in-memory (off-chain)
+ * path continues to use the base states directly.
  */
 export const INTENT_STATES = [
   "open",
+  "pending_open",      // submitted create_intent tx, awaiting ledger confirmation
   "accepted",
+  "pending_accepted",  // submitted accept tx, awaiting ledger confirmation
   "filled",
+  "pending_filled",    // submitted fill tx, awaiting ledger confirmation
   "cancelled",
+  "pending_cancelled", // submitted cancel tx, awaiting ledger confirmation
   "expired",
   "slashed",
 ] as const;
@@ -59,14 +78,14 @@ export interface TokenInfo {
   decimals: number;
   chain: SupportedChain;
   logoURI?: string;
-  priceUSD?: number;
+  priceUSD?: number | null;
 }
 
 export interface StellarToken {
   contract: string;
   symbol: string;
   decimals: number;
-  priceUSD?: number;
+  priceUSD?: number | null;
 }
 
 export interface Intent {
@@ -88,6 +107,17 @@ export interface Intent {
   txHash?: string; // fill tx on Stellar
   slashedAt?: number;
   slashReason?: string;
+  /**
+   * Transaction hash of the submitted-but-not-yet-confirmed on-chain write.
+   * Only set when state is one of the `pending_*` variants (issue #385).
+   * Cleared (set to undefined) once the intent transitions to the confirmed state.
+   */
+  pendingTxHash?: string;
+  /**
+   * Which write operation is pending, matching the current `pending_*` state.
+   * Only set when state is one of the `pending_*` variants (issue #385).
+   */
+  pendingOp?: "create" | "accept" | "fill" | "cancel";
 }
 
 export interface Quote {

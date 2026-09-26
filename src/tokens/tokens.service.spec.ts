@@ -1,12 +1,37 @@
 import { BadRequestException } from "@nestjs/common";
 import { TokensService } from "./tokens.service";
 import { SUPPORTED_TOKENS, STELLAR_TOKENS } from "./tokens.data";
+import { InMemoryTokensRepository } from "./in-memory-tokens.repository";
+import { ITokensRepository, TokenRecord } from "./tokens.repository";
+import { SupportedChain } from "../intents/intents.types";
+
+/** Build a minimal mock repo that returns a single token with the given priceUsd. */
+function makeMockRepo(token: Partial<TokenRecord> & { address: string; chain: SupportedChain }): ITokensRepository {
+  const record: TokenRecord = {
+    id: "mock-1",
+    address: token.address,
+    symbol: token.symbol ?? "TKN",
+    name: token.name ?? "Token",
+    decimals: token.decimals ?? 6,
+    chain: token.chain,
+    isStellar: token.chain === "stellar",
+    priceUsd: token.priceUsd !== undefined ? token.priceUsd : 1.0,
+  };
+  return {
+    findAll: () => [record],
+    findByChain: (chain) => (chain === record.chain ? [record] : []),
+    findByAddressAndChain: (address, chain) =>
+      address === record.address && chain === record.chain ? { ...record } : undefined,
+  };
+}
 
 describe("TokensService", () => {
   let service: TokensService;
+  let repo: InMemoryTokensRepository;
 
   beforeEach(() => {
-    service = new TokensService();
+    repo = new InMemoryTokensRepository();
+    service = new TokensService(repo);
   });
 
   it("getByChain with no chain returns the full registry plus Stellar tokens", () => {
@@ -33,8 +58,8 @@ describe("TokensService", () => {
     expect(result).toHaveProperty("tokens");
   });
 
-  it("getStellarTokens returns the Stellar token list", () => {
-    const result = service.getStellarTokens();
+  it("getStellarTokens returns the Stellar token list", async () => {
+    const result = await service.getStellarTokens();
     expect(Array.isArray(result.tokens)).toBe(true);
     expect(result.tokens.length).toBeGreaterThan(0);
   });
@@ -91,8 +116,20 @@ describe("TokensService", () => {
     });
 
     it("returns undefined for an unknown chain", () => {
-      // "optimism" is in the SUPPORTED_TOKENS registry but let's verify a truly unknown chain
       expect(service.resolveSrcToken("avalanche" as any, "0xunknown")).toBeUndefined();
+    });
+
+    it("returns null priceUSD when priceUsd is null in repo", () => {
+      const mockRepo = makeMockRepo({
+        address: "0xNullPrice",
+        chain: "ethereum",
+        symbol: "NULL",
+        priceUsd: null,
+      });
+      const svc = new TokensService(mockRepo);
+      const result = svc.resolveSrcToken("ethereum", "0xNullPrice");
+      expect(result).toBeDefined();
+      expect(result!.priceUSD).toBeNull();
     });
   });
 
@@ -122,6 +159,19 @@ describe("TokensService", () => {
 
     it("returns undefined for an empty string", () => {
       expect(service.resolveDstToken("")).toBeUndefined();
+    });
+
+    it("returns null priceUSD when priceUsd is null in repo", () => {
+      const mockRepo = makeMockRepo({
+        address: "CNULLPRICE",
+        chain: "stellar",
+        symbol: "NULL",
+        priceUsd: null,
+      });
+      const svc = new TokensService(mockRepo);
+      const result = svc.resolveDstToken("CNULLPRICE");
+      expect(result).toBeDefined();
+      expect(result!.priceUSD).toBeNull();
     });
   });
 
@@ -161,6 +211,32 @@ describe("TokensService", () => {
 
     it("throws BadRequestException for an empty contract", () => {
       expect(() => service.resolveDstTokenOrThrow("")).toThrow(BadRequestException);
+    });
+  });
+
+  // ── #332: null priceUSD in getStellarTokens ────────────────────────────────
+
+  describe("getStellarTokens", () => {
+    it("returns null priceUSD for tokens with no price in repo", async () => {
+      const mockRepo = makeMockRepo({
+        address: "CNULLPRICE",
+        chain: "stellar",
+        symbol: "NULL",
+        priceUsd: null,
+      });
+      const svc = new TokensService(mockRepo);
+      const result = await svc.getStellarTokens();
+      expect(result.tokens).toHaveLength(1);
+      expect(result.tokens[0].priceUSD).toBeNull();
+    });
+
+    it("returns numeric priceUSD for tokens that have a price", async () => {
+      const result = await service.getStellarTokens();
+      expect(result.tokens.length).toBeGreaterThan(0);
+      for (const token of result.tokens) {
+        // All tokens in the default in-memory registry have static prices
+        expect(typeof token.priceUSD).toBe("number");
+      }
     });
   });
 });

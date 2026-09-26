@@ -6,9 +6,10 @@ import { SolverRegistryService } from "./solver-registry.service";
 import { SignerService } from "./signer.service";
 import { StellarTxService } from "./stellar-tx.service";
 import { SolversModule } from "../solvers/solvers.module";
+import { SettlementContractClient } from "./settlement-contract.client";
 
 @Module({
-  imports: [forwardRef(() => IntentsModule)],
+  imports: [SolversModule],
   controllers: [SorobanController],
   providers: [
     SorobanService,
@@ -16,6 +17,7 @@ import { SolversModule } from "../solvers/solvers.module";
     SignerService,
     StellarTxService,
     EventIngestionService,
+    SettlementContractClient,
   ],
   exports: [
     SorobanService,
@@ -23,6 +25,7 @@ import { SolversModule } from "../solvers/solvers.module";
     SignerService,
     StellarTxService,
     EventIngestionService,
+    SettlementContractClient,
   ],
 })
 export class SorobanModule {}

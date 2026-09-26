@@ -290,7 +290,7 @@ describe("IntentsGateway logging", () => {
     jest.advanceTimersByTime(60_000);
 
     expect(logger.debug).toHaveBeenCalledWith(
-      "ws heartbeat terminated dead client (subscribers=0)",
+      "ws heartbeat terminated 1 dead client(s) (subscribers=0)",
     );
   });
 });
@@ -578,5 +578,61 @@ describe("IntentsGateway — event replay (#258)", () => {
 
     // @ts-expect-error – accessing private for assertion
     expect(gateway.ringBuffer.size()).toBe(1);
+  });
+});
+
+// ── #334: Heartbeat observability improvements ────────────────────────────
+
+describe("IntentsGateway — heartbeat observability (#334)", () => {
+  let gateway: IntentsGateway;
+  let intentsService: IntentsService;
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    jest.clearAllMocks();
+    intentsService = makeIntentsService();
+    gateway = new IntentsGateway(intentsService, makeSolversService());
+  });
+
+  afterEach(() => {
+    gateway.onModuleDestroy();
+    jest.useRealTimers();
+  });
+
+  it("heartbeatIntervalMs defaults to 30000", () => {
+    expect(gateway.heartbeatIntervalMs).toBe(30_000);
+  });
+
+  it("getLastTerminatedCount() returns 0 initially", () => {
+    expect(gateway.getLastTerminatedCount()).toBe(0);
+  });
+
+  it("getLastTerminatedCount() reflects terminated clients after heartbeat", () => {
+    const client = createMockClient();
+    gateway.handleConnection(client as unknown as import("ws").WebSocket);
+
+    // First tick: marks alive=false, sends ping
+    jest.advanceTimersByTime(30_000);
+    expect(gateway.getLastTerminatedCount()).toBe(0);
+
+    // Second tick: client didn't pong → terminated
+    jest.advanceTimersByTime(30_000);
+    expect(gateway.getLastTerminatedCount()).toBe(1);
+  });
+
+  it("getZombieCount() returns count of clients that missed a ping but are not yet terminated", () => {
+    const client = createMockClient();
+    gateway.handleConnection(client as unknown as import("ws").WebSocket);
+
+    // Before first heartbeat: all clients are alive (alive=true), no zombies
+    expect(gateway.getZombieCount()).toBe(0);
+
+    // After first heartbeat tick: alive is set to false for clients that didn't pong
+    jest.advanceTimersByTime(30_000);
+    expect(gateway.getZombieCount()).toBe(1);
+
+    // After second tick: zombie is terminated, count back to 0
+    jest.advanceTimersByTime(30_000);
+    expect(gateway.getZombieCount()).toBe(0);
   });
 });

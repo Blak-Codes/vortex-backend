@@ -21,6 +21,13 @@ import { StellarTxService } from "../soroban/stellar-tx.service";
 import { PrismaService } from "../prisma/prisma.service";
 
 const STORE_SIZE_LOG_INTERVAL_MS = 60_000;
+
+/**
+ * States that indicate the intent lifecycle has fully completed.
+ * Pending states (pending_open, pending_accepted, etc.) are intentionally
+ * excluded — they are awaiting on-chain confirmation and must not be evicted
+ * from the in-memory store (issue #385).
+ */
 const TERMINAL_STATES: IntentState[] = ["filled", "cancelled", "expired", "slashed"];
 
 /** How long a completed idempotency-key result stays replayable. */
@@ -195,23 +202,53 @@ export class IntentsService implements OnModuleDestroy {
   /**
    * Build, optionally register on-chain, and persist a brand-new intent.
    * Contains no idempotency logic — deduplication is the caller's concern.
+   *
+   * Issue #385 — when `onchainIntentsEnabled` is true, the intent is first
+   * persisted with state `"pending_open"` and `pendingOp: "create"`.  Once the
+   * on-chain submission returns a hash the intent is updated to carry
+   * `pendingTxHash`.  The intent remains in `pending_open` until a separate
+   * confirmation step (e.g. polling or a webhook) calls `confirmIntent()` to
+   * advance it to `"open"`.  When `onchainIntentsEnabled` is false the intent
+   * is saved directly with state `"open"` (no change to the existing path).
    */
   private async persistNewIntent(
     data: Omit<Intent, "intentId" | "createdAt" | "state">,
   ): Promise<Intent> {
     const now = Math.floor(Date.now() / 1000);
+    const onchainEnabled = this.configService.get("onchainIntentsEnabled", { infer: true });
 
     const intent: Intent = {
       ...data,
       intentId: uuidv4(),
-      state: "open",
+      // Issue #385: use pending_open when on-chain is enabled so callers know
+      // the creation transaction has been submitted but not yet confirmed.
+      state: onchainEnabled ? "pending_open" : "open",
       createdAt: now,
       deadline:
         data.deadline ?? now + (CHAIN_DEADLINE_DEFAULTS[data.srcChain] ?? DEFAULT_DEADLINE_SECONDS),
+      ...(onchainEnabled ? { pendingOp: "create" as const } : {}),
     };
 
-    if (this.configService.get("onchainIntentsEnabled", { infer: true })) {
-      await this.registerOnChain(intent);
+    if (onchainEnabled) {
+      // Save first with pending_open so the record exists even if the on-chain
+      // call is slow or the process restarts mid-flight.
+      await this.repo.save(intent);
+
+      try {
+        const txHash = await this.registerOnChain(intent);
+        if (txHash) {
+          // Update the record with the submitted tx hash so callers can track it.
+          await this.repo.update(intent.intentId, { pendingTxHash: txHash });
+          intent.pendingTxHash = txHash;
+        }
+      } catch (err) {
+        // registerOnChain already throws ServiceUnavailableException — re-throw
+        // but clean up the dangling pending_open record first.
+        await this.repo.delete(intent.intentId);
+        throw err;
+      }
+
+      return (await this.repo.findById(intent.intentId)) ?? intent;
     }
 
     await this.repo.save(intent);
@@ -222,8 +259,11 @@ export class IntentsService implements OnModuleDestroy {
    * Registers `intent` with the settlement contract. Only called when
    * ONCHAIN_INTENTS_ENABLED is on; while that flag is off, create() stays
    * fully in-memory (the rollout fallback).
+   *
+   * Issue #385: returns the submitted transaction hash so callers can attach
+   * it to the intent record as `pendingTxHash`.
    */
-  private async registerOnChain(intent: Intent): Promise<void> {
+  private async registerOnChain(intent: Intent): Promise<string | undefined> {
     const contractId = this.configService.get("stellar.settlementContractId", { infer: true });
     if (!contractId) {
       throw new ServiceUnavailableException(
@@ -238,6 +278,7 @@ export class IntentsService implements OnModuleDestroy {
         args: this.buildCreateIntentArgs(intent),
       });
       this.logger.log(`Registered intent ${intent.intentId} on-chain (tx ${result.hash})`);
+      return result.hash as string | undefined;
     } catch (err) {
       this.logger.error(
         `Failed to register intent ${intent.intentId} on-chain: ${(err as Error).message}`,
@@ -301,6 +342,11 @@ export class IntentsService implements OnModuleDestroy {
   /**
    * Count the number of intents in "open" or "accepted" state for a user.
    *
+   * Issue #385 — pending_open and pending_accepted are also counted as active
+   * since they represent intents whose on-chain write has been submitted but
+   * not yet confirmed.  A user holding a `pending_open` intent should still
+   * be subject to the MAX_OPEN_INTENTS_PER_USER cap.
+   *
    * Used by IntentsController.create() to enforce MAX_OPEN_INTENTS_PER_USER.
    * The query is a simple filter over findByUser so it works identically
    * against the in-memory adapter and — once the repo is swapped — can be
@@ -310,7 +356,11 @@ export class IntentsService implements OnModuleDestroy {
   async countOpenByUser(user: string): Promise<number> {
     const userIntents = await this.repo.findByUser(user);
     return userIntents.filter(
-      (i) => i.state === "open" || i.state === "accepted",
+      (i) =>
+        i.state === "open" ||
+        i.state === "pending_open" ||
+        i.state === "accepted" ||
+        i.state === "pending_accepted",
     ).length;
   }
 
@@ -327,6 +377,11 @@ export class IntentsService implements OnModuleDestroy {
    * so solvers on slower-settling chains get a proportionally longer window
    * and are not unfairly slashed for a deadline that was never realistic.
    * Returns null when the intent is not found or is not in the "open" state.
+   *
+   * Issue #385 — when `onchainIntentsEnabled` is true the intent first moves to
+   * `"pending_accepted"` (via `transitionToOnChainPending`) after the accept is
+   * recorded; the caller gets back the pending_accepted record and should return
+   * HTTP 202.
    */
   async acceptIfOpen(id: string, solver: string): Promise<Intent | null> {
     const intent = await this.repo.findById(id);
@@ -334,29 +389,58 @@ export class IntentsService implements OnModuleDestroy {
     const now = Math.floor(Date.now() / 1000);
     const fillWindow =
       CHAIN_FILL_WINDOW_DEFAULTS[intent.srcChain] ?? DEFAULT_FILL_WINDOW_SECONDS;
-    return this.repo.acceptIfOpen(id, solver, now + fillWindow);
+    const accepted = await this.repo.acceptIfOpen(id, solver, now + fillWindow);
+    if (!accepted) return null;
+
+    if (this.configService.get("onchainIntentsEnabled", { infer: true })) {
+      return this.transitionToOnChainPending(id, "accept");
+    }
+
+    return accepted;
   }
 
   /**
    * Atomically fill an intent only if it is currently "accepted" by the given solver.
    * Returns null when the intent is not found, not accepted, or assigned to a
    * different solver.
+   *
+   * Issue #385 — when `onchainIntentsEnabled` is true the intent moves to
+   * `"pending_filled"` after the fill is recorded; the caller gets back the
+   * pending_filled record and should return HTTP 202.
    */
   async fillIfAccepted(
     id: string,
     solver: string,
     patch: Omit<Partial<Intent>, "state" | "solver">,
   ): Promise<Intent | null> {
-    return this.repo.fillIfAccepted(id, solver, patch);
+    const filled = await this.repo.fillIfAccepted(id, solver, patch);
+    if (!filled) return null;
+
+    if (this.configService.get("onchainIntentsEnabled", { infer: true })) {
+      return this.transitionToOnChainPending(id, "fill");
+    }
+
+    return filled;
   }
 
   /**
    * Atomically cancel an intent only if it is currently "open".
    * Returns null when the intent is not found or is not in the "open" state
    * (e.g. a concurrent accept() or sweeper expiry already transitioned it).
+   *
+   * Issue #385 — when `onchainIntentsEnabled` is true the intent moves to
+   * `"pending_cancelled"` after the cancel is recorded; the caller gets back the
+   * pending_cancelled record and should return HTTP 202.
    */
   async cancelIfOpen(id: string): Promise<Intent | null> {
-    return this.repo.cancelIfOpen(id);
+    const cancelled = await this.repo.cancelIfOpen(id);
+    if (!cancelled) return null;
+
+    if (this.configService.get("onchainIntentsEnabled", { infer: true })) {
+      return this.transitionToOnChainPending(id, "cancel");
+    }
+
+    return cancelled;
   }
 
   /**
@@ -377,6 +461,84 @@ export class IntentsService implements OnModuleDestroy {
     patch: { slashedAt: number; slashReason: string },
   ): Promise<Intent | null> {
     return this.repo.slashIfAccepted(id, patch);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Pending on-chain state management (issue #385)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Transition an intent to the corresponding `pending_*` state for the given
+   * operation.  Sets `pendingOp` and optionally `pendingTxHash` on the record.
+   *
+   * Mapping:
+   *   "create" → "pending_open"
+   *   "accept" → "pending_accepted"
+   *   "fill"   → "pending_filled"
+   *   "cancel" → "pending_cancelled"
+   *
+   * Returns the updated intent, or `null` if the intent no longer exists.
+   * This method does NOT validate the current state — that guard lives in the
+   * repository methods (acceptIfOpen, fillIfAccepted, etc.) which must be
+   * called first.
+   */
+  async transitionToOnChainPending(
+    intentId: string,
+    op: "create" | "accept" | "fill" | "cancel",
+    txHash?: string,
+  ): Promise<Intent | null> {
+    const pendingStateMap: Record<typeof op, IntentState> = {
+      create: "pending_open",
+      accept: "pending_accepted",
+      fill: "pending_filled",
+      cancel: "pending_cancelled",
+    };
+
+    const patch: Partial<Intent> = {
+      state: pendingStateMap[op],
+      pendingOp: op,
+      ...(txHash ? { pendingTxHash: txHash } : {}),
+    };
+
+    return this.repo.update(intentId, patch);
+  }
+
+  /**
+   * Confirm a pending intent by advancing it from a `pending_*` state to the
+   * corresponding confirmed state.  Clears `pendingTxHash` and `pendingOp`.
+   *
+   * Mapping (confirmed transitions):
+   *   "pending_open"      → "open"
+   *   "pending_accepted"  → "accepted"
+   *   "pending_filled"    → "filled"
+   *   "pending_cancelled" → "cancelled"
+   *
+   * Returns the updated intent, or `null` if the intent is not found or is not
+   * in a pending state.  Intended to be called by a confirmation poller or
+   * webhook handler once the on-chain tx reaches finality (issue #385).
+   */
+  async confirmIntent(intentId: string): Promise<Intent | null> {
+    const intent = await this.repo.findById(intentId);
+    if (!intent) return null;
+
+    const confirmationMap: Partial<Record<IntentState, IntentState>> = {
+      pending_open: "open",
+      pending_accepted: "accepted",
+      pending_filled: "filled",
+      pending_cancelled: "cancelled",
+    };
+
+    const nextState = confirmationMap[intent.state];
+    if (!nextState) {
+      // Not in a pending state — nothing to confirm.
+      return null;
+    }
+
+    return this.repo.update(intentId, {
+      state: nextState,
+      pendingTxHash: undefined,
+      pendingOp: undefined,
+    });
   }
 
   // ---------------------------------------------------------------------------

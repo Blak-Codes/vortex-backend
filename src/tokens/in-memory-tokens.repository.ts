@@ -40,12 +40,10 @@ export class InMemoryTokensRepository implements ITokensRepository {
   findByAddressAndChain(address: string, chain: SupportedChain | string): TokenRecord | undefined {
     const normalizedAddress = address.trim();
     const chainName = String(chain).toLowerCase();
-    return this.records.find(
-      (record) =>
-        record.address.toLowerCase() === normalizedAddress.toLowerCase() &&
-        record.chain === chainName,
-    )
-      ? { ...this.records.find((record) => record.address.toLowerCase() === normalizedAddress.toLowerCase() && record.chain === chainName) }
-      : undefined;
+    const record = this.records.find(
+      (r) =>
+        r.address.toLowerCase() === normalizedAddress.toLowerCase() && r.chain === chainName,
+    );
+    return record ? { ...record } : undefined;
   }
 }

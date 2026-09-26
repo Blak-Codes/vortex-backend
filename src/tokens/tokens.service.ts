@@ -1,5 +1,5 @@
-import { BadRequestException, Injectable } from "@nestjs/common";
-import { SUPPORTED_TOKENS, STELLAR_TOKENS, SourceToken, StellarToken } from "./tokens.data";
+import { BadRequestException, Inject, Injectable } from "@nestjs/common";
+import { SUPPORTED_TOKENS, STELLAR_TOKENS } from "./tokens.data";
 import { SupportedChain } from "../intents/intents.types";
 import { ITokensRepository, TOKENS_REPOSITORY, TokenRecord } from "./tokens.repository";
 
@@ -14,7 +14,7 @@ export interface ResolvedSrcToken {
   name: string;
   decimals: number;
   chain: SupportedChain;
-  priceUSD: number;
+  priceUSD: number | null;
 }
 
 /**
@@ -26,10 +26,19 @@ export interface ResolvedDstToken {
   symbol: string;
   name: string;
   decimals: number;
-  priceUSD: number;
+  priceUSD: number | null;
 }
 
 export type ResolvedToken = ResolvedSrcToken | ResolvedDstToken;
+
+/** Shape returned by getStellarTokens — priceUSD is nullable (issue #332). */
+export interface ResolvedStellarToken {
+  contract: string;
+  symbol: string;
+  name: string;
+  decimals: number;
+  priceUSD: number | null;
+}
 
 @Injectable()
 export class TokensService {
@@ -51,7 +60,9 @@ export class TokensService {
    * @param address Token contract/address string
    */
   resolveSrcToken(chain: SupportedChain, address: string): ResolvedSrcToken | undefined {
-    const token = this.repo.findByAddressAndChain(address, chain);
+    // ITokensRepository.findByAddressAndChain may be sync or async; the in-memory
+    // implementation is always synchronous so we cast to the sync result type.
+    const token = this.repo.findByAddressAndChain(address, chain) as TokenRecord | undefined;
     if (!token) return undefined;
     return {
       kind: "src",
@@ -60,7 +71,7 @@ export class TokensService {
       name: token.name,
       decimals: token.decimals,
       chain,
-      priceUSD: token.priceUsd ?? 0,
+      priceUSD: token.priceUsd ?? null,
     };
   }
 
@@ -70,7 +81,7 @@ export class TokensService {
    * Returns `undefined` when no match is found.
    */
   resolveDstToken(contract: string): ResolvedDstToken | undefined {
-    const token = this.repo.findByAddressAndChain(contract, "stellar");
+    const token = this.repo.findByAddressAndChain(contract, "stellar") as TokenRecord | undefined;
     if (!token) return undefined;
     return {
       kind: "dst",
@@ -78,7 +89,7 @@ export class TokensService {
       symbol: token.symbol,
       name: token.name,
       decimals: token.decimals,
-      priceUSD: token.priceUsd ?? 0,
+      priceUSD: token.priceUsd ?? null,
     };
   }
 
@@ -116,28 +127,56 @@ export class TokensService {
   }
 
   getByChain(chain?: string) {
+    const stellarTokens = STELLAR_TOKENS.map((t) => ({
+      contract: t.contract,
+      symbol: t.symbol,
+      name: t.name,
+      decimals: t.decimals,
+      priceUSD: t.priceUSD ?? null,
+    }));
+
+    const chainRecords = Object.entries(SUPPORTED_TOKENS).flatMap(([chainKey, tokens]) =>
+      tokens.map((t) => ({
+        address: t.address,
+        contract: t.address,
+        symbol: t.symbol,
+        name: t.name,
+        decimals: t.decimals,
+        chain: chainKey,
+        priceUSD: t.priceUSD ?? null,
+      })),
+    );
+
     if (chain === "stellar") {
-      return { tokens: stellarTokens.map((t) => ({ ...t, contract: t.address })), chain: "stellar" };
+      return { tokens: stellarTokens, chain: "stellar" };
     }
     if (chain && chain in SUPPORTED_TOKENS) {
       return {
-        tokens: chainRecords.filter((t) => t.chain === chain).map((t) => ({ ...t, contract: t.address })),
+        tokens: chainRecords.filter((t) => t.chain === chain),
         chain,
       };
     }
     return {
       tokens: Object.fromEntries(
-        Object.entries(SUPPORTED_TOKENS).map(([key, _]) => [
+        Object.keys(SUPPORTED_TOKENS).map((key) => [
           key,
-          chainRecords.filter((t) => t.chain === key).map((t) => ({ ...t, contract: t.address })),
+          chainRecords.filter((t) => t.chain === key),
         ]),
       ),
-      stellarTokens: stellarTokens.map((t) => ({ ...t, contract: t.address })),
+      stellarTokens,
     };
   }
 
-  async getStellarTokens(): Promise<{ tokens: StellarToken[] }> {
+  async getStellarTokens(): Promise<{ tokens: ResolvedStellarToken[] }> {
     const tokens = await this.repo.findByChain("stellar");
-    return { tokens: tokens.map((t) => ({ contract: t.address, symbol: t.symbol, name: t.name, decimals: t.decimals, priceUSD: t.priceUsd ?? 0 })) };
+    return {
+      tokens: tokens.map((t) => ({
+        contract: t.address,
+        symbol: t.symbol,
+        name: t.name,
+        decimals: t.decimals,
+        priceUSD: t.priceUsd ?? null,
+      })),
+    };
   }
 }

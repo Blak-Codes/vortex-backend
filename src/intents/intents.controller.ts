@@ -6,12 +6,15 @@ import {
   ForbiddenException,
   Get,
   GoneException,
+  HttpStatus,
   NotFoundException,
   Param,
   Post,
   Query,
+  Res,
   UseGuards,
 } from "@nestjs/common";
+import type { Response } from "express";
 import {
   ApiTags,
   ApiOkResponse,
@@ -196,6 +199,8 @@ export class IntentsController {
   /**
    * Issue #44 — global IP throttle already applied via AppModule guard.
    * Issue #45 — additionally throttle per dto.user: 10 creates / 60 s.
+   * Issue #385 — returns HTTP 202 when the intent is in `pending_open` state
+   *   (on-chain tx submitted, awaiting confirmation) instead of the usual 201.
    */
   @Post()
   @UseGuards(UserThrottlerGuard)
@@ -207,7 +212,7 @@ export class IntentsController {
   @ApiConflictResponse({
     description: `Open-intent cap reached — a single user may not hold more than ${MAX_OPEN_INTENTS_PER_USER} open/accepted intents simultaneously`,
   })
-  async create(@Body() dto: CreateIntentDto) {
+  async create(@Body() dto: CreateIntentDto, @Res({ passthrough: true }) res: Response) {
     const now = Math.floor(Date.now() / 1000);
 
     // #219: use typed resolveToken instead of ad-hoc duck-typed any casts.
@@ -243,6 +248,15 @@ export class IntentsController {
       },
       dto.idempotencyKey,
     );
+
+    // Issue #385: return 202 Accepted when the on-chain tx has been submitted
+    // but the intent is not yet confirmed (state === "pending_open").
+    if (intent.state === "pending_open") {
+      res.status(HttpStatus.ACCEPTED);
+    } else {
+      res.status(HttpStatus.CREATED);
+    }
+
     this.intentsGateway.broadcast({ type: "intent_created", intent });
     return intent;
   }
@@ -280,7 +294,7 @@ export class IntentsController {
   @ApiConflictResponse({ description: "Intent is not in open state" })
   @ApiGoneResponse({ description: "Intent has expired" })
   @ApiForbiddenResponse({ description: "Solver not registered or inactive" })
-  async accept(@Param("id") id: string, @Body() dto: AcceptIntentDto) {
+  async accept(@Param("id") id: string, @Body() dto: AcceptIntentDto, @Res({ passthrough: true }) res: Response) {
     const intent = await this.intentsService.get(id);
     if (!intent) throw new NotFoundException("Intent not found");
 
@@ -310,6 +324,12 @@ export class IntentsController {
       throw new ConflictException(`Intent is ${current?.state ?? "unknown"}, cannot accept`);
     }
 
+    // Issue #385: return 202 Accepted when the on-chain tx has been submitted
+    // but the accept is not yet confirmed (state === "pending_accepted").
+    if (updated.state === "pending_accepted") {
+      res.status(HttpStatus.ACCEPTED);
+    }
+
     this.intentsGateway.broadcast({
       type: "intent_accepted",
       intentId: id,
@@ -324,7 +344,7 @@ export class IntentsController {
   @ApiForbiddenResponse({ description: "Wrong solver for this intent" })
   @ApiGoneResponse({ description: "Fill window has expired" })
   @ApiBadRequestResponse({ description: "Fill amount below minimum" })
-  async fill(@Param("id") id: string, @Body() dto: FillIntentDto) {
+  async fill(@Param("id") id: string, @Body() dto: FillIntentDto, @Res({ passthrough: true }) res: Response) {
     const intent = await this.intentsService.get(id);
     if (!intent) throw new NotFoundException("Intent not found");
 
@@ -373,6 +393,12 @@ export class IntentsController {
 
     await this.solversService.recordSuccessfulFill(dto.solver);
 
+    // Issue #385: return 202 Accepted when the on-chain tx has been submitted
+    // but the fill is not yet confirmed (state === "pending_filled").
+    if (updated.state === "pending_filled") {
+      res.status(HttpStatus.ACCEPTED);
+    }
+
     this.intentsGateway.broadcast({
       type: "intent_filled",
       intentId: id,
@@ -386,7 +412,7 @@ export class IntentsController {
   @ApiNotFoundResponse({ description: "Intent not found" })
   @ApiForbiddenResponse({ description: "Unauthorized" })
   @ApiConflictResponse({ description: "Intent is not in open state" })
-  async cancel(@Param("id") id: string, @Body() dto: CancelIntentDto) {
+  async cancel(@Param("id") id: string, @Body() dto: CancelIntentDto, @Res({ passthrough: true }) res: Response) {
     const intent = await this.intentsService.get(id);
     if (!intent) throw new NotFoundException("Intent not found");
     if (intent.user.toLowerCase() !== dto.user.toLowerCase()) {
@@ -407,6 +433,12 @@ export class IntentsController {
 
     // Audit trail (issue #217 / #62): record who cancelled and when.
     this.intentsService.appendAuditEntry(id, "cancelled", dto.user, "user cancelled");
+
+    // Issue #385: return 202 Accepted when the on-chain tx has been submitted
+    // but the cancel is not yet confirmed (state === "pending_cancelled").
+    if (updated.state === "pending_cancelled") {
+      res.status(HttpStatus.ACCEPTED);
+    }
 
     this.intentsGateway.broadcast({ type: "intent_cancelled", intentId: id });
     return updated;
