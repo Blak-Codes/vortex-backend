@@ -14,10 +14,7 @@ import { RoutingModule } from "./routing/routing.module";
 import { MetricsModule } from "./metrics/metrics.module";
 import { KillSwitchModule } from "./killswitch/killswitch.module";
 import { PrismaModule } from "./prisma/prisma.module";
-import { TreasuryModule } from "./treasury/treasury.module";
-import { GovernanceModule } from "./governance/governance.module";
-import { MetricsModule } from "./metrics/metrics.module";
-import { LeaderElectionModule } from "./common/leader-election";
+import { DatasetsModule } from "./datasets/datasets.module";
 
 @Module({
   imports: [
