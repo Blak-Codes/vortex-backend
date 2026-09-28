@@ -21,6 +21,8 @@
     "db:studio": "prisma studio",
     "db:validate": "prisma validate",
     "generate:client": "npm run build && tsx scripts/generate-client.ts",
+    "check:migrations": "tsx scripts/check-migrations.ts",
+    "test:scripts": "jest --config scripts/jest.config.js",
     "prepare": "husky"
   },
   "dependencies": {
