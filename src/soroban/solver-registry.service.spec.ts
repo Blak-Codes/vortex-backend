@@ -30,6 +30,16 @@ function makeConfigService(
     wsMaxConnections: 1000,
     wsBackplane: "memory",
     redisUrl: "redis://localhost:6379",
+    datasets: {
+      enabled: false,
+      anonymize: true,
+      salt: "",
+      saltRotationHours: 24,
+      saltRetentionWindows: 2,
+      publicBucket: "vortex-public-datasets",
+      storageKind: "memory",
+      localDir: ".datasets",
+    },
   };
   return {
     get: (key: string) => {

@@ -133,4 +133,38 @@ export const envValidationSchema = Joi.object({
       }),
       otherwise: Joi.boolean().default(true),
     }),
+
+  // ── Public anonymised datasets (docs/rfcs/0001) ───────────────────────────
+  // The rotating-salt anonymisation secret.  In production this MUST be set to
+  // a strong random value; an unset salt collapses anonymisation to a fixed,
+  // reversible transform and defeats the privacy guarantee.
+  DATASETS_ENABLED: Joi.boolean().default(false),
+  DATASETS_ANONYMIZE: Joi.boolean().default(true),
+  // Required only when datasets are enabled AND anonymisation is on — an
+  // empty/weak salt would collapse pseudonymisation to a fixed, reversible
+  // transform.  It stays optional (default "") otherwise so existing dev/test
+  // configs are unaffected.
+  DATASETS_SALT: Joi.string()
+    .when("DATASETS_ENABLED", {
+      is: true,
+      then: Joi.string().when("DATASETS_ANONYMIZE", {
+        is: true,
+        then: Joi.string()
+          .min(32)
+          .required()
+          .messages({
+            "any.required":
+              "DATASETS_SALT must be set when DATASETS_ENABLED=true and DATASETS_ANONYMIZE=true. " +
+              "Generate a strong random secret (e.g. `openssl rand -hex 32`).",
+            "string.min": "DATASETS_SALT must be at least 32 characters.",
+          }),
+        otherwise: Joi.string().allow("").default(""),
+      }),
+      otherwise: Joi.string().allow("").default(""),
+    }),
+  DATASETS_SALT_ROTATION_HOURS: Joi.number().integer().min(1).default(24),
+  DATASETS_SALT_RETENTION_WINDOWS: Joi.number().integer().min(0).default(2),
+  DATASETS_PUBLIC_BUCKET: Joi.string().default("vortex-public-datasets"),
+  DATASETS_STORAGE: Joi.string().valid("local", "memory").default("local"),
+  DATASETS_LOCAL_DIR: Joi.string().default(".datasets"),
 });

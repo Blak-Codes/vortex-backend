@@ -113,6 +113,17 @@ export interface AppConfig {
   wsMaxConnections: number;
   wsBackplane: "memory" | "redis";
   redisUrl: string;
+  /** Public anonymised dataset publication settings (see docs/rfcs/0001). */
+  datasets: {
+    enabled: boolean;
+    anonymize: boolean;
+    salt: string;
+    saltRotationHours: number;
+    saltRetentionWindows: number;
+    publicBucket: string;
+    storageKind: "local" | "memory";
+    localDir: string;
+  };
 }
 
 export default (): AppConfig => ({
@@ -142,4 +153,14 @@ export default (): AppConfig => ({
   wsMaxConnections: parseInt(process.env.WS_MAX_CONNECTIONS ?? "1000", 10),
   wsBackplane: (process.env.WS_BACKPLANE ?? "memory") as "memory" | "redis",
   redisUrl: process.env.REDIS_URL ?? "redis://localhost:6379",
+  datasets: {
+    enabled: (process.env.DATASETS_ENABLED ?? "false") === "true",
+    anonymize: (process.env.DATASETS_ANONYMIZE ?? "true") === "true",
+    salt: process.env.DATASETS_SALT ?? "",
+    saltRotationHours: parseInt(process.env.DATASETS_SALT_ROTATION_HOURS ?? "24", 10),
+    saltRetentionWindows: parseInt(process.env.DATASETS_SALT_RETENTION_WINDOWS ?? "2", 10),
+    publicBucket: process.env.DATASETS_PUBLIC_BUCKET ?? "vortex-public-datasets",
+    storageKind: (process.env.DATASETS_STORAGE ?? "local") as "local" | "memory",
+    localDir: process.env.DATASETS_LOCAL_DIR ?? ".datasets",
+  },
 });

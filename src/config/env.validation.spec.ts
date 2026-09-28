@@ -164,3 +164,53 @@ describe("envValidationSchema — ONCHAIN_DRY_RUN (#260)", () => {
     expect(value.ONCHAIN_DRY_RUN).toBe(false);
   });
 });
+
+describe("envValidationSchema — DATASETS_SALT (public anonymised datasets)", () => {
+  it("defaults to an empty string when datasets are disabled", () => {
+    const { error, value } = envValidationSchema.validate(BASE_ENV);
+    expect(error).toBeUndefined();
+    expect(value.DATASETS_SALT).toBe("");
+  });
+
+  it("requires a salt when datasets are enabled and anonymisation is on", () => {
+    const { error } = envValidationSchema.validate({
+      ...BASE_ENV,
+      DATASETS_ENABLED: true,
+      DATASETS_ANONYMIZE: true,
+    });
+    expect(error).toBeDefined();
+    expect(error?.message).toContain("DATASETS_SALT");
+  });
+
+  it("rejects a short salt when datasets are enabled and anonymisation is on", () => {
+    const { error } = envValidationSchema.validate({
+      ...BASE_ENV,
+      DATASETS_ENABLED: true,
+      DATASETS_ANONYMIZE: true,
+      DATASETS_SALT: "short",
+    });
+    expect(error).toBeDefined();
+    expect(error?.message).toContain("at least 32 characters");
+  });
+
+  it("accepts a strong salt when datasets are enabled and anonymisation is on", () => {
+    const salt = "a".repeat(32);
+    const { error, value } = envValidationSchema.validate({
+      ...BASE_ENV,
+      DATASETS_ENABLED: true,
+      DATASETS_ANONYMIZE: true,
+      DATASETS_SALT: salt,
+    });
+    expect(error).toBeUndefined();
+    expect(value.DATASETS_SALT).toBe(salt);
+  });
+
+  it("does not require a salt when anonymisation is disabled", () => {
+    const { error } = envValidationSchema.validate({
+      ...BASE_ENV,
+      DATASETS_ENABLED: true,
+      DATASETS_ANONYMIZE: false,
+    });
+    expect(error).toBeUndefined();
+  });
+});
