@@ -54,6 +54,11 @@ Commit message format is enforced via [commitlint](https://commitlint.js.org/) s
 - Typed Swagger response documentation for every `SorobanController` and
   `TokensController` route, including the account route's 400/429 responses
   (Closes #271)
+- `src/disputes/` — structured slash-dispute (appeal) workflow: authenticated
+  `POST /api/v1/solvers/disputes`, evidence auto-verification (fill-verifier),
+  reviewer lifecycle (`open → under_review → upheld | overturned`) with SLA
+  deadlines and RBAC (`ReviewerGuard`), treasury refund requests on overturn,
+  and public anonymised statistics (`docs/governance/dispute-reviewers.md`)
 - `src/analytics/` — analytics layer over TimescaleDB continuous aggregates
   (ADR-0001) with `GET /api/v1/analytics/{volume,fees,latency,solver-share}`
   endpoints (`interval`, `from`, `to`, `chain`, `token` params), idempotent

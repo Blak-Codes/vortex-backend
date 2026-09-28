@@ -465,6 +465,15 @@ export class SolversService {
     };
   }
 
+  /** Look up a slash by its id across all solvers (used by the dispute flow). */
+  async getSlash(slashId: string): Promise<SlashRecord | null> {
+    for (const records of this.slashHistory.values()) {
+      const found = records.find((entry) => entry.slashId === slashId);
+      if (found) return found;
+    }
+    return null;
+  }
+
   async submitDispute(
     address: string,
     slashId: string,
