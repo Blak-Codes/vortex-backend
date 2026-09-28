@@ -4,6 +4,7 @@ import { IntentsService } from "./intents.service";
 import { IntentsController } from "./intents.controller";
 import { IntentsGateway } from "./intents.gateway";
 import { IntentsSweeperService } from "./intents-sweeper.service";
+import { IntentsMaintenanceJobs } from "./intents-maintenance.jobs";
 import { INTENTS_REPOSITORY, InMemoryIntentsRepository } from "./intents.repository";
 import { PrismaIntentsRepository } from "./prisma-intents.repository";
 import { IntentCapabilityIndex } from "./solver-intent-matcher";
@@ -49,6 +50,7 @@ import { GovernanceModule } from "../governance/governance.module";
     IntentCapabilityIndex,
     IntentsGateway,
     IntentsSweeperService,
+    IntentsMaintenanceJobs,
     // Note: EventIngestionService is provided by SorobanModule (imported above)
     // and exported from there — no re-declaration needed here.
   ],
