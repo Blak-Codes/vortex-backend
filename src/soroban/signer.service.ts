@@ -1,84 +1,88 @@
-import { Injectable } from "@nestjs/common";
-import { ConfigService } from "@nestjs/config";
-import { Keypair, Networks, Transaction, FeeBumpTransaction } from "@stellar/stellar-sdk";
-import { readFileSync } from "node:fs";
-import { AppConfig } from "../config/configuration";
-import { SorobanService } from "./soroban.service";
+/**
+ * SignerService (issue #400 — refactored)
+ * ─────────────────────────────────────────
+ * Facade that delegates all signing operations to the injected ISigner backend
+ * (LocalKeypairSigner or VaultTransitSigner).  Existing callers continue to
+ * use SignerService unchanged — they do not need to know which backend is
+ * active.
+ *
+ * Sequence-number management lives here (not in the backend) because it is
+ * network-state rather than key-material.  The in-process lock and sequence
+ * cache are independent of the signing implementation.
+ *
+ * The raw secret key is no longer held by this service — it is owned
+ * exclusively by LocalKeypairSigner (and never exists in memory at all when
+ * VaultTransitSigner is used).  The toString / toJSON / inspect overrides
+ * here therefore only report the active backend name, never key material.
+ */
 
-const NETWORK_PASSPHRASES: Record<AppConfig["stellar"]["network"], string> = {
-  testnet: Networks.TESTNET,
-  futurenet: Networks.FUTURENET,
-  mainnet: Networks.PUBLIC,
-};
+import { Inject, Injectable, Logger, Optional } from "@nestjs/common";
+import { FeeBumpTransaction, Transaction, xdr } from "@stellar/stellar-sdk";
+import { SorobanService } from "./soroban.service";
+import { ISigner, SIGNER_TOKEN } from "./signers/signer.interface";
 
 const REDACTED = "[redacted]";
 
-/**
- * Holds the backend's Soroban hot-wallet key (env-injected secret, per the
- * on-chain settlement ADR), signs transactions with it, and manages that
- * account's sequence number.
- *
- * The raw secret is kept in a private field and is never included in thrown
- * errors, logs, or object inspection (see the custom inspect override below).
- * Presence is enforced for production by `env.validation.ts`; outside
- * production it may be unset, in which case signing operations throw a clear
- * error rather than the app failing to boot.
- *
- * Sequence numbers are managed in-process rather than by calling
- * `getAccount()` per request: Soroban requires the *exact* next sequence
- * number, and two concurrent submissions from this same signing account that
- * each independently fetched "the current sequence" would both try to use
- * it, so one would be rejected. `withNextSequence` serializes access with an
- * in-process lock and hands out a fresh, already-incremented number per call.
- */
 @Injectable()
 export class SignerService {
-  private readonly secretKey: string;
-  private readonly networkPassphrase: string;
-  private keypair: Keypair | null = null;
+  private readonly logger = new Logger(SignerService.name);
 
   // Chains sequence acquisitions so they run one at a time, in call order.
   private sequenceLock: Promise<void> = Promise.resolve();
   private cachedSequence: bigint | null = null;
 
   constructor(
-    configService: ConfigService<AppConfig, true>,
+    @Inject(SIGNER_TOKEN) private readonly backend: ISigner,
     private readonly sorobanService: SorobanService,
-  ) {
-    const configuredSecret = configService.get("stellar.signingKey", { infer: true });
-    const secretFile = process.env.SOROBAN_SIGNING_KEY_FILE?.trim();
-    this.secretKey = secretFile ? readFileSync(secretFile, "utf8").trim() : configuredSecret;
-    this.networkPassphrase = NETWORK_PASSPHRASES[configService.get("stellar.network", { infer: true })];
-  }
+  ) {}
 
-  /** Whether a signer secret has been configured. False in dev/test by default. */
-  isConfigured(): boolean {
-    return this.secretKey.length > 0;
-  }
+  // ── ISigner delegation ────────────────────────────────────────────────────
 
-  getNetworkPassphrase(): string {
-    return this.networkPassphrase;
-  }
-
+  /** Returns the signing account's Stellar public key (G-address). */
   getPublicKey(): string {
-    return this.getKeypair().publicKey();
+    return this.backend.publicKey();
   }
 
-  sign<T extends Transaction | FeeBumpTransaction>(transaction: T): T {
-    transaction.sign(this.getKeypair());
-    return transaction;
+  /** Returns the Stellar network passphrase this service was configured for. */
+  getNetworkPassphrase(): string {
+    return this.backend.networkPassphrase();
   }
 
   /**
-   * Runs `fn` with the next sequence number for the signing account, holding
-   * an in-process lock for the duration so no other caller can be handed the
-   * same sequence number concurrently.
+   * Sign a transaction.  Delegates to the active backend.
    *
-   * The sequence is fetched from the network once and cached; every call
-   * after that increments the cached value locally rather than re-fetching.
-   * If `fn` throws — e.g. the transaction it built was never accepted by the
-   * network — the cache is dropped so the next call re-syncs from the
-   * network instead of drifting out of step with the account's real state.
+   * @deprecated Prefer `withNextSequence` for new Soroban transaction submissions.
+   */
+  async sign<T extends Transaction | FeeBumpTransaction>(transaction: T): Promise<T> {
+    return this.backend.signTransaction(transaction);
+  }
+
+  /**
+   * Sign a Soroban auth entry.  Delegates to the active backend.
+   */
+  async signAuthEntry(entry: xdr.SorobanAuthorizationEntry): Promise<xdr.SorobanAuthorizationEntry> {
+    return this.backend.signAuthEntry(entry);
+  }
+
+  /** Whether a signing key has been configured.  False in dev/test by default. */
+  isConfigured(): boolean {
+    try {
+      return this.backend.publicKey().length > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  // ── Sequence-number management ────────────────────────────────────────────
+
+  /**
+   * Runs `fn` with the next sequence number for the signing account, holding
+   * an in-process lock for the duration so no concurrent caller gets the same
+   * sequence number.
+   *
+   * The sequence is fetched from the network once and cached; subsequent calls
+   * increment the cached value locally.  If `fn` throws the cache is dropped
+   * so the next call re-syncs from the network rather than drifting.
    */
   async withNextSequence<T>(fn: (sequence: string) => Promise<T>): Promise<T> {
     let releaseLock!: () => void;
@@ -108,22 +112,18 @@ export class SignerService {
     return this.cachedSequence.toString();
   }
 
-  private getKeypair(): Keypair {
-    if (!this.secretKey) {
-      throw new Error("Soroban signer is not configured: set SOROBAN_SIGNER_SECRET_KEY");
-    }
-    if (!this.keypair) {
-      this.keypair = Keypair.fromSecret(this.secretKey);
-    }
-    return this.keypair;
-  }
+  // ── Redaction guarantees ──────────────────────────────────────────────────
 
   toString(): string {
-    return `SignerService(publicKey=${this.isConfigured() ? this.getPublicKey() : "unconfigured"}, secretKey=${REDACTED})`;
+    return `SignerService(backend=${this.backend.constructor.name}, publicKey=${this.isConfigured() ? this.getPublicKey() : "unconfigured"}, secretKey=${REDACTED})`;
   }
 
   toJSON(): unknown {
-    return { publicKey: this.isConfigured() ? this.getPublicKey() : null, secretKey: REDACTED };
+    return {
+      backend: this.backend.constructor.name,
+      publicKey: this.isConfigured() ? this.getPublicKey() : null,
+      secretKey: REDACTED,
+    };
   }
 
   [Symbol.for("nodejs.util.inspect.custom")](): string {

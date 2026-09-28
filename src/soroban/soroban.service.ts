@@ -28,6 +28,17 @@ export class SorobanService {
     return this.server.getAccount(publicKey);
   }
 
+  /**
+   * Fetch a ledger header by sequence number.
+   *
+   * Used by the event-ingestion loop to date the newest event it has seen: the
+   * `closeTime` here is what makes `vortex_event_ingestion_lag_seconds` a real
+   * measurement rather than a guess.
+   */
+  getLedger(sequence: number) {
+    return this.server.getLedger(sequence);
+  }
+
   getEvents(request: SorobanRpc.Server.GetEventsRequest) {
     return this.server.getEvents(request);
   }
@@ -50,5 +61,9 @@ export class SorobanService {
 
   submitTransaction(transaction: Transaction): Promise<SorobanRpc.Api.SendTransactionResponse> {
     return this.server.sendTransaction(transaction);
+  }
+
+  getTransaction(hash: string): Promise<SorobanRpc.Api.GetTransactionResponse> {
+    return this.server.getTransaction(hash);
   }
 }

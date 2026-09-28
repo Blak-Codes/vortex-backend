@@ -17,6 +17,17 @@ export const SUPPORTED_CHAINS = [
 export type SupportedChain = (typeof SUPPORTED_CHAINS)[number];
 
 /**
+ * The Stellar chain identifier, named for readability at call sites that would
+ * otherwise repeat the literal.
+ *
+ * Distinct from the Soroban *network* ("testnet" / "mainnet" /
+ * "futurenet"), which selects an RPC endpoint. Kill-switch scopes and intent
+ * records are addressed by chain, not by network, so anything matching against
+ * a chain must use this value.
+ */
+export const STELLAR_CHAIN = "stellar" satisfies SupportedChain;
+
+/**
  * A single entry in the append-only audit log for an intent.
  * Every state transition — cancel, expire, accept, fill — appends one entry.
  * Once persistence lands (issue #36) this will be written to an `intent_audit_log`
@@ -88,6 +99,13 @@ export interface Intent {
   txHash?: string; // fill tx on Stellar
   slashedAt?: number;
   slashReason?: string;
+  /**
+   * Snapshot of the governance-controlled protocol parameters that were active
+   * when this intent was created.  Used to evaluate fee/window terms for
+   * in-flight intents even after a governance update changes the live values.
+   * Absent on intents created before issue #500 was deployed.
+   */
+  paramsVersion?: number;
 }
 
 export interface Quote {
