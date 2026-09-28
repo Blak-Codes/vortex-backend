@@ -12,11 +12,6 @@ import { IntentsModule } from "../intents/intents.module";
   controllers: [SolversController],
   providers: [
     // Select the persistence adapter based on SOLVERS_PERSISTENCE env var.
-    // SOLVERS_PERSISTENCE=prisma  → PrismaSolversRepository (production/staging)
-    // SOLVERS_PERSISTENCE=memory  → InMemorySolversRepository (default, dev/test)
-    //
-    // Swap this binding (and only this binding) to change the storage backend —
-    // SolversService and everything above it stay unchanged.
     {
       provide: SOLVERS_REPOSITORY,
       inject: [PrismaService],

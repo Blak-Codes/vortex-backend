@@ -5,6 +5,15 @@ import * as Joi from "joi";
 // it does not by itself prove the key is a *real, funded* signer.
 const STELLAR_SECRET_KEY_PATTERN = /^S[A-Z2-7]{55}$/;
 
+// One message for both "absent" and "empty". Joi's .required() alone accepts an
+// empty string, which for the kill-switch would be a silently disabled control
+// plane — the exact condition this rule exists to prevent, so both cases must
+// produce the same actionable error.
+const KILLSWITCH_TOKEN_REQUIRED_MESSAGE =
+  "KILLSWITCH_OPERATOR_TOKEN must be a non-empty secret in production so the " +
+  "emergency pause control plane (/api/v1/ops/killswitch) is usable. Generate " +
+  "one with `openssl rand -hex 32`. See docs/runbooks/killswitch.md.";
+
 export const envValidationSchema = Joi.object({
   NODE_ENV: Joi.string().valid("development", "production", "test").default("development"),
   PORT: Joi.number().port().default(4000),
@@ -71,6 +80,20 @@ export const envValidationSchema = Joi.object({
   INTENTS_PERSISTENCE: Joi.string().valid("memory", "prisma").default("memory"),
   SOLVERS_PERSISTENCE: Joi.string().valid("memory", "prisma").default("memory"),
 
+  // ── Intent retention (in-memory store hygiene) ─────────────────────────────
+  // How long terminal intents are kept in the in-memory adapter, and how often
+  // the eviction sweep runs.  Both are read by IntentsService.
+  INTENT_RETENTION_DAYS: Joi.number().integer().min(0).default(30),
+  INTENT_RETENTION_SWEEP_MS: Joi.number().integer().min(0).default(60000),
+
+  // ── Reference solver bot (scripts/solver-bot.ts) ───────────────────────────
+  // Read by the standalone bot process rather than by the server, but declared
+  // here so `npm run check:env-drift` sees one consistent variable set across
+  // env.validation.ts, configuration.ts and the .env*.example files.
+  SOLVER_SECRET: Joi.string().allow("").default(""),
+  SOLVER_ADDRESS: Joi.string().allow("").default(""),
+  SOLVER_CHAINS: Joi.string().allow("").default(""),
+
   // ── Observability ─────────────────────────────────────────────────────────
   // Sentry DSN for error alerting.  Omit (or leave blank) to disable Sentry.
   SENTRY_DSN: Joi.string().uri().allow("").default(""),
@@ -101,6 +124,94 @@ export const envValidationSchema = Joi.object({
   LOG_SHIPPING_PATH: Joi.string().default("/"),
   LOG_SHIPPING_SSL: Joi.boolean().default(false),
   LOG_SERVICE_NAME: Joi.string().default("vortex-backend"),
+
+  // ── Pluggable signer backend (issue #400) ────────────────────────────────
+  // SIGNER_BACKEND selects which signing implementation is used:
+  //   "local"  (default) — LocalKeypairSigner: key loaded from SOROBAN_SIGNING_KEY / file.
+  //                        Refused in production unless ALLOW_LOCAL_SIGNER_IN_PROD=true.
+  //   "vault"            — VaultTransitSigner: signs via HashiCorp Vault Transit (ed25519).
+  //                        Requires VAULT_ADDR + VAULT_TOKEN.  Key never enters RAM.
+  SIGNER_BACKEND: Joi.string().valid("local", "vault").default("local"),
+
+  // Required when SIGNER_BACKEND=vault.
+  VAULT_ADDR: Joi.string().uri({ scheme: ["http", "https"] }).when("SIGNER_BACKEND", {
+    is: "vault",
+    then: Joi.required(),
+    otherwise: Joi.string().allow("").default(""),
+  }),
+  VAULT_TOKEN: Joi.string().when("SIGNER_BACKEND", {
+    is: "vault",
+    then: Joi.required(),
+    otherwise: Joi.string().allow("").default(""),
+  }),
+  // Name of the Vault Transit key (default: "vortex-signer").
+  VAULT_TRANSIT_KEY_NAME: Joi.string().default("vortex-signer"),
+
+  // Escape hatch: allow LocalKeypairSigner in production.
+  // Must be explicitly set to "true" — any other value is treated as false.
+  // A startup warning is emitted when this is enabled in production.
+  ALLOW_LOCAL_SIGNER_IN_PROD: Joi.boolean().default(false),
+  // ── Resource-exhaustion limits (issue #476) ───────────────────────────────
+  // These values are consumed by src/config/limits.config.ts at startup and
+  // override the compile-time defaults when set.  All have safe defaults so
+  // the service can boot without them.
+
+  /** Max JSON nesting depth before the body is rejected (default 10). */
+  JSON_MAX_DEPTH: Joi.number().integer().min(1).max(100).default(10),
+
+  /** Max WS chain-filter values per subscribe message (default 20). */
+  WS_MAX_FILTER_CHAINS: Joi.number().integer().min(1).max(100).default(20),
+
+  /** Max active subscriptions per WS connection (default 10). */
+  WS_MAX_SUBSCRIPTIONS: Joi.number().integer().min(1).max(100).default(10),
+
+  /** Default Postgres statement_timeout in ms for standard route queries (default 5000). */
+  DB_QUERY_TIMEOUT_MS: Joi.number().integer().min(100).max(60000).default(5000),
+
+  /** Postgres statement_timeout in ms for batch-lookup queries (default 10000). */
+  DB_BATCH_QUERY_TIMEOUT_MS: Joi.number().integer().min(100).max(60000).default(10000),
+
+  /** Postgres statement_timeout in ms for stats/aggregate queries (default 15000). */
+  DB_STATS_QUERY_TIMEOUT_MS: Joi.number().integer().min(100).max(60000).default(15000),
+
+  // ── Emergency kill-switch (issue #477) ─────────────────────────────────────
+  // Shared secret for the operator control plane. Empty (the default) leaves
+  // /api/v1/ops/killswitch disabled — fail closed, never open.
+  //
+  // The kill-switch is the only way to stop writes at runtime, so a production
+  // deploy without a token ships a protocol that cannot be paused. Requiring it
+  // in production fails validation rather than silently running with the
+  // control plane disabled.
+  KILLSWITCH_OPERATOR_TOKEN: Joi.string()
+    .when("NODE_ENV", {
+      is: Joi.valid("production"),
+      then: Joi.string()
+        .required()
+        .invalid("")
+        .messages({
+          "any.required": KILLSWITCH_TOKEN_REQUIRED_MESSAGE,
+          "string.empty": KILLSWITCH_TOKEN_REQUIRED_MESSAGE,
+          "any.invalid": KILLSWITCH_TOKEN_REQUIRED_MESSAGE,
+        }),
+      otherwise: Joi.string().allow("").default(""),
+    }),
+
+  /**
+   * Redis URL for cross-replica pause propagation. Empty means "polling only",
+   * which still meets the 5 s budget. Defaults to reusing REDIS_URL when
+   * WS_BACKPLANE=redis, so existing deployments propagate without new config.
+   */
+  KILLSWITCH_REDIS_URL: Joi.string().allow("").optional(),
+
+  /**
+   * DB change-probe interval (ms) that backstops Redis pub/sub. Capped at 5000
+   * so the worst-case propagation delay cannot exceed the requirement, however
+   * misconfigured.
+   */
+  KILLSWITCH_POLL_MS: Joi.number().integer().min(100).max(5000).default(2000),
+
+  // Same adapter-selection convention as the other repositories.
+  KILLSWITCH_PERSISTENCE: Joi.string().valid("memory", "prisma").default("memory"),
 
   // ── On-chain write safety flag (issue #35 / issue #260) ──────────────────
   // When true, every on-chain-write code path (invokeContract, slashSolver)
@@ -133,4 +244,62 @@ export const envValidationSchema = Joi.object({
       }),
       otherwise: Joi.boolean().default(true),
     }),
+
+  // ── Shadow-mode divergence monitor (issue #401) ───────────────────────────
+  // Runs read-only on-chain simulations of every intent state transition in
+  // parallel with the authoritative off-chain path and reports where the two
+  // disagree.  Never submits a transaction; see src/soroban/shadow.service.ts.
+  //
+  // Off by default: a sampled simulation is a real RPC call with a real
+  // rate-limit footprint, so it is an explicit per-environment opt-in.
+  SHADOW_MODE_ENABLED: Joi.boolean().default(false),
+
+  // Fraction of transitions to simulate, as a probability in [0, 1].
+  // 1 (the default) compares every transition; 0 disables sampling entirely
+  // while leaving the monitor "enabled" — useful for a canary that only wants
+  // the queue/metric plumbing live.
+  SHADOW_SAMPLE_RATE: Joi.number().min(0).max(1).default(1),
+
+  // Hard cap on queued observations.  Beyond this, observations are dropped and
+  // counted (`vortex_shadow_dropped_total`) rather than queued, so a slow or
+  // unreachable RPC degrades the monitor instead of the service.
+  SHADOW_QUEUE_MAX: Joi.number().integer().min(1).default(256),
+
+  // How many queued observations the background drain simulates concurrently.
+  SHADOW_CONCURRENCY: Joi.number().integer().min(1).max(32).default(4),
+
+  // Public key used as the transaction source for shadow simulations.  A Stellar
+  // public key (strkey G...).  It is never signed, never submitted and never
+  // charged a fee — it only has to be a valid address for the envelope.
+  // Optional: when empty the monitor reports `contract_unconfigured` rather
+  // than silently recording zero divergence.
+  SHADOW_SOURCE_ACCOUNT: Joi.string().allow("").default(""),
+  // ── Governance parameters contract ────────────────────────────────────────
+  // When set, ProtocolParamsService reads current + scheduled protocol
+  // parameters (fee bps, fill windows, deadlines, exposure ratio, slash
+  // amount) from this Soroban contract address.  Leave blank to use code
+  // and env defaults.
+  PARAMS_CONTRACT_ID: Joi.string().allow("").default(""),
+
+  // How often (ms) to poll the parameters contract.  30 s is the default;
+  // lower values increase RPC load; raise in production if rate-limited.
+  PARAMS_POLL_INTERVAL_MS: Joi.number().integer().min(5_000).default(30_000),
+  // ── Leader election (issue #493) ──────────────────────────────────────────
+  // Controls whether Postgres advisory-lock based leader election is enabled
+  // for singleton workers (sweeper, event-ingestion).
+  //
+  // Set LEADER_ELECTION_ENABLED=false in single-instance dev deployments or
+  // when no database is available. When disabled, every worker considers
+  // itself leader unconditionally — the pre-election behaviour.
+  //
+  // IMPORTANT: Do NOT route the leader election connection through PgBouncer
+  // in transaction-pooling mode. Advisory locks are session-scoped; they are
+  // released when the connection is returned to the pool. Use a direct
+  // connection or PgBouncer in session mode.
+  LEADER_ELECTION_ENABLED: Joi.boolean().default(false),
+
+  // Heartbeat interval in milliseconds — how often non-leaders attempt to
+  // acquire the lock and leaders renew it. Lower values reduce failover time
+  // but increase DB load. Default 5 s gives ≤ 15 s failover.
+  LEADER_ELECTION_HEARTBEAT_MS: Joi.number().integer().min(1000).max(60000).default(5000),
 });

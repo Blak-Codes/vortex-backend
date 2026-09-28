@@ -233,6 +233,28 @@ export class PrismaIntentsRepository implements IIntentsRepository {
     return row ? this.fromRow(row) : null;
   }
 
+  /**
+   * Issue #477 — push an accepted intent's deadline out during a fill pause.
+   * The `deadline < newDeadline` predicate makes this a no-op once the window
+   * is already long enough, so repeated sweep cycles cannot creep the deadline
+   * forward indefinitely.
+   */
+  async extendDeadlineIfAccepted(id: string, newDeadline: number): Promise<Intent | null> {
+    const result = await this.prisma.intent.updateMany({
+      where: {
+        intentId: id,
+        state: PrismaIntentState.accepted,
+        deadline: { lt: newDeadline },
+      },
+      data: { deadline: newDeadline },
+    });
+
+    if (result.count === 0) return null;
+
+    const row = await this.prisma.intent.findUnique({ where: { intentId: id } });
+    return row ? this.fromRow(row) : null;
+  }
+
   // ── Private helpers ────────────────────────────────────────────────────────
 
   /** Map Intent → Prisma create/update data (omits intentId which is the key). */

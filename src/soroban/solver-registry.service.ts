@@ -12,6 +12,12 @@ import {
 } from "@stellar/stellar-sdk";
 import { AppConfig } from "../config/configuration";
 import { SignerService } from "./signer.service";
+import { KillSwitchService } from "../killswitch/killswitch.service";
+import {
+  assertNotPaused,
+  KillSwitchActiveException,
+} from "../killswitch/killswitch.guard";
+import { STELLAR_CHAIN } from "../intents/intents.types";
 
 const NETWORK_PASSPHRASE: Record<AppConfig["stellar"]["network"], string> = {
   testnet: Networks.TESTNET,
@@ -64,15 +70,18 @@ export class SolverRegistryService {
   private readonly networkPassphrase: string;
   private readonly server: SorobanRpc.Server;
   private readonly dryRun: boolean;
+  private readonly chain: string;
 
   constructor(
     configService: ConfigService<AppConfig, true>,
     private readonly signerService?: SignerService,
+    private readonly killSwitch?: KillSwitchService,
   ) {
     this.contractId = configService.get("stellar.solverRegistryContractId", { infer: true });
     this.signingKey = configService.get("stellar.signingKey", { infer: true });
     const network = configService.get("stellar.network", { infer: true });
     this.networkPassphrase = NETWORK_PASSPHRASE[network];
+    this.chain = STELLAR_CHAIN;
     const rpcUrl = configService.get("stellar.sorobanRpcUrl", { infer: true });
     this.server = new SorobanRpc.Server(rpcUrl, { allowHttp: rpcUrl.startsWith("http://") });
     this.dryRun = configService.get("onchainDryRun", { infer: true });
@@ -83,6 +92,11 @@ export class SolverRegistryService {
   }
 
   async slashSolver(params: SlashParams): Promise<SlashResult> {
+    // Issue #477 — slashing is an on-chain write, so it is gated on both the
+    // `slash` operation and the `onchain` umbrella. Evaluated before the
+    // dry-run short-circuit so a pause shows up in logs either way.
+    this.assertSlashAllowed(params.solverAddress);
+
     // ── Dry-run short-circuit (ONCHAIN_DRY_RUN=true) ────────────────────────
     // When dry-run is on, log what *would* be submitted and return immediately
     // without touching the network. This is the reference implementation for
@@ -160,6 +174,33 @@ export class SolverRegistryService {
         `[solver-registry] slash call errored for solver=${params.solverAddress} intent=${params.intentId}: ${detail}`,
       );
       return { submitted: false, simulated: false, dryRun: false, detail };
+    }
+  }
+
+  /**
+   * Throws when an emergency pause covers slashing on this chain.
+   *
+   * Optional injection keeps this constructible in unit tests that don't wire
+   * the kill-switch module; when absent the check is skipped, which is safe
+   * because the module is `@Global()` and always present in the real app.
+   */
+  private assertSlashAllowed(solverAddress: string): void {
+    if (!this.killSwitch) return;
+
+    try {
+      assertNotPaused(this.killSwitch, {
+        chain: this.chain,
+        token: null,
+        operation: "slash",
+      });
+    } catch (err) {
+      if (err instanceof KillSwitchActiveException) {
+        this.logger.warn(
+          `Slash blocked by kill-switch: solver=${solverAddress} ` +
+            `scope=${err.scope} reason=${err.reasonCode}`,
+        );
+      }
+      throw err;
     }
   }
 }
