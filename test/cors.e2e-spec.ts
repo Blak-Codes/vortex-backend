@@ -13,6 +13,8 @@ import request from "supertest";
 import { AppModule } from "../src/app.module";
 import { AppConfig } from "../src/config/configuration";
 import { HttpExceptionFilter } from "../src/common/http-exception.filter";
+import { PrismaService } from "../src/prisma/prisma.service";
+import { MockPrismaService } from "./utils/create-test-app";
 
 async function createAppWithOrigin(origin: string): Promise<INestApplication> {
   // Override CORS_ORIGIN before the module initializes.
@@ -20,7 +22,10 @@ async function createAppWithOrigin(origin: string): Promise<INestApplication> {
 
   const moduleRef = await Test.createTestingModule({
     imports: [AppModule],
-  }).compile();
+  })
+    .overrideProvider(PrismaService)
+    .useClass(MockPrismaService)
+    .compile();
 
   const app = moduleRef.createNestApplication();
   app.useWebSocketAdapter(new WsAdapter(app));
@@ -41,7 +46,10 @@ async function createAppWithSecurityHeaders(nodeEnv = "development"): Promise<IN
 
   const moduleRef = await Test.createTestingModule({
     imports: [AppModule],
-  }).compile();
+  })
+    .overrideProvider(PrismaService)
+    .useClass(MockPrismaService)
+    .compile();
 
   const app = moduleRef.createNestApplication();
   app.set("trust proxy", 1);

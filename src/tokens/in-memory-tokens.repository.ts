@@ -41,6 +41,8 @@ export class InMemoryTokensRepository implements ITokensRepository {
     const normalizedAddress = address.trim().toLowerCase();
     const chainName = String(chain).toLowerCase();
     const match = this.records.find(
+      (record) =>
+        record.address.toLowerCase() === normalizedAddress && record.chain === chainName,
       (record) => record.address.toLowerCase() === normalizedAddress && record.chain === chainName,
     );
     return match ? { ...match } : undefined;

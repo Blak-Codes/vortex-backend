@@ -111,6 +111,7 @@ describe("SorobanController", () => {
   // -------------------------------------------------------------------------
 
   describe("getAccount", () => {
+    const PUBLIC_KEY = "GA6NGB7335VYC4CEHUN6KZD2NNESU36BKCL5LZCTTY6ICW5ZVII67FF4";
     // Real strkeys (valid CRC16). A well-formed-looking "G…" string with a bad
     // checksum is rejected by the controller, so fixtures must be genuine.
     const PUBLIC_KEY = "GAMS2CGT4CPVYB5LSZV3FAOYFJK67574RS5HASJNTNS7WEUO3CN6ADW4";
@@ -128,6 +129,8 @@ describe("SorobanController", () => {
     });
 
     it("passes a different publicKey correctly", async () => {
+      const anotherKey = "GBCI24BNYGGIRDE4PCUD6PJAQINUVQPIUJCBJT4HTZZONEXNVVDIYVAC";
+      mockSorobanService.getAccount.mockResolvedValueOnce({ id: anotherKey });
       mockSorobanService.getAccount.mockResolvedValueOnce({ id: OTHER_KEY });
 
       await controller.getAccount(OTHER_KEY);

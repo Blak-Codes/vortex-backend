@@ -151,6 +151,7 @@ export const envValidationSchema = Joi.object({
   // Must be explicitly set to "true" — any other value is treated as false.
   // A startup warning is emitted when this is enabled in production.
   ALLOW_LOCAL_SIGNER_IN_PROD: Joi.boolean().default(false),
+  
   // ── Resource-exhaustion limits (issue #476) ───────────────────────────────
   // These values are consumed by src/config/limits.config.ts at startup and
   // override the compile-time defaults when set.  All have safe defaults so
@@ -227,12 +228,11 @@ export const envValidationSchema = Joi.object({
   //     on-chain write paths.  This matches the fail-closed pattern used
   //     for SOROBAN_SIGNING_KEY.
   //
-  // Limitations: the flag is config-driven and takes effect on the next
-  // process start; there is no HTTP endpoint to flip it at runtime without
-  // a restart.  This limitation is documented in onchain-cutover.md and is
-  // intentional for this iteration — a hot-reload mechanism is a separate
-  // concern.  Set ONCHAIN_DRY_RUN=false only after completing the dry-run
-  // soak described in docs/runbooks/onchain-cutover.md.
+  // This is the env default for the `onchain-dry-run` runtime feature flag
+  // (issue #495); the flag can override it without a restart, and turning
+  // dry-run off in production through the flag requires two approvals.
+  // Set ONCHAIN_DRY_RUN=false only after completing the dry-run soak
+  // described in docs/runbooks/onchain-cutover.md.
   ONCHAIN_DRY_RUN: Joi.boolean()
     .when("NODE_ENV", {
       is: "production",
@@ -274,6 +274,7 @@ export const envValidationSchema = Joi.object({
   // Optional: when empty the monitor reports `contract_unconfigured` rather
   // than silently recording zero divergence.
   SHADOW_SOURCE_ACCOUNT: Joi.string().allow("").default(""),
+  
   // ── Governance parameters contract ────────────────────────────────────────
   // When set, ProtocolParamsService reads current + scheduled protocol
   // parameters (fee bps, fill windows, deadlines, exposure ratio, slash
@@ -284,6 +285,7 @@ export const envValidationSchema = Joi.object({
   // How often (ms) to poll the parameters contract.  30 s is the default;
   // lower values increase RPC load; raise in production if rate-limited.
   PARAMS_POLL_INTERVAL_MS: Joi.number().integer().min(5_000).default(30_000),
+  
   // ── Leader election (issue #493) ──────────────────────────────────────────
   // Controls whether Postgres advisory-lock based leader election is enabled
   // for singleton workers (sweeper, event-ingestion).
@@ -302,4 +304,77 @@ export const envValidationSchema = Joi.object({
   // acquire the lock and leaders renew it. Lower values reduce failover time
   // but increase DB load. Default 5 s gives ≤ 15 s failover.
   LEADER_ELECTION_HEARTBEAT_MS: Joi.number().integer().min(1000).max(60000).default(5000),
+
+  // ── Background jobs (issue #494) ──────────────────────────────────────────
+  // PROCESS_ROLE: "api" serves HTTP/WS only, "worker" runs queue workers,
+  // "all" does both (single-process dev default). Producers work in any role.
+  PROCESS_ROLE: Joi.string().valid("api", "worker", "all").default("all"),
+  // JOBS_DRIVER: "memory" is single-process and non-durable (dev/test);
+  // "bullmq" uses REDIS_URL and is required for multi-instance deploys.
+  JOBS_DRIVER: Joi.string().valid("memory", "bullmq").default("memory"),
+  JOBS_SHUTDOWN_TIMEOUT_MS: Joi.number().integer().min(0).default(25000),
+
+  // ── Runtime feature flags (issue #495) ────────────────────────────────────
+  FLAGS_PUBSUB: Joi.string().valid("memory", "redis").default("memory"),
+  FLAGS_REFRESH_MS: Joi.number().integer().min(1000).default(30000),
+  // Comma-separated "key=true|false" pins that win over DB state (break-glass).
+  FLAG_OVERRIDES: Joi.string()
+    .allow("")
+    .pattern(/^([a-z0-9-]+=(true|false))(,[a-z0-9-]+=(true|false))*$/)
+    .default(""),
+
+  // ── Admin RBAC ────────────────────────────────────────────────────────────
+  // Comma-separated "id:role:secret" entries; role is "admin" or "superadmin".
+  // Empty disables every admin endpoint (401).
+  ADMIN_API_KEYS: Joi.string()
+    .allow("")
+    .pattern(/^([A-Za-z0-9_.-]+:(admin|superadmin):[^,:]{16,})(,[A-Za-z0-9_.-]+:(admin|superadmin):[^,:]{16,})*$/)
+    .default(""),
+
+  // ── Guardian emergency ingestion (issue #507) ─────────────────────────────
+  GUARDIAN_CONTRACT_ID: Joi.string().allow("").default(""),
+
+  // ── Synthetic canary (issue #496) ─────────────────────────────────────────
+  // Comma-separated canary user/solver addresses, excluded from public stats
+  // and leaderboards.
+  CANARY_ADDRESSES: Joi.string().allow("").default(""),
+
+  // ── Egress / SSRF Protection (issue #468) ─────────────────────────────────
+  // Controls the centralized HttpEgressService used for all outbound HTTP requests
+  // (RPC, Horizon, oracles, webhooks) to prevent SSRF attacks.
+  EGRESS_TIMEOUT_MS: Joi.number().integer().min(1000).max(60000).default(10000),
+  EGRESS_MAX_REDIRECTS: Joi.number().integer().min(0).max(5).default(3),
+  EGRESS_MAX_BODY_SIZE_BYTES: Joi.number().integer().min(1024).default(10485760), // 10MB
+  SOROBAN_RPC_ALLOWLIST: Joi.string().allow("").default(""),
+  WEBHOOK_ALLOWLIST: Joi.string().allow("").default(""),
+  ORACLE_ALLOWLIST: Joi.string().allow("").default(""),
+});
+  // ── WS gateway hardening (issue #455) ─────────────────────────────────────
+  WS_MAX_PAYLOAD_BYTES: Joi.number().integer().min(1024).default(16384),
+  WS_MAX_CONNECTIONS_PER_IP: Joi.number().integer().min(0).default(20),
+  // Hops of trusted reverse proxies in front of the service. 0 ignores
+  // X-Forwarded-For entirely so clients cannot spoof their IP.
+  WS_TRUST_PROXY_HOPS: Joi.number().integer().min(0).default(0),
+  WS_RATE_LIMIT_PER_SEC: Joi.number().positive().default(10),
+  WS_RATE_LIMIT_BURST: Joi.number().integer().min(1).default(20),
+  WS_RATE_LIMIT_MAX_VIOLATIONS: Joi.number().integer().min(1).default(5),
+  WS_OUTBOUND_QUEUE_MAX: Joi.number().integer().min(1).default(1000),
+  WS_OUTBOUND_BUFFER_BYTES: Joi.number().integer().min(1024).default(1048576),
+  WS_SLOW_CONSUMER_POLICY: Joi.string().valid("drop_oldest", "disconnect").default("drop_oldest"),
+  // HS256 secret shared with the SEP-10 auth endpoint (#442). Empty disables
+  // JWT auth; signature auth keeps working.
+  AUTH_JWT_SECRET: Joi.string().allow("").min(32).default(""),
+
+  // ── Health probes (issue #492) ────────────────────────────────────────────
+  // Comma-separated roles this process serves: api, ws, worker.
+  SERVICE_ROLES: Joi.string()
+    .pattern(/^(api|ws|worker)(,(api|ws|worker))*$/)
+    .default("api,ws,worker"),
+  HEALTH_CHECK_INTERVAL_MS: Joi.number().integer().min(500).default(5000),
+  HEALTH_READY_FAILURE_THRESHOLD: Joi.number().integer().min(1).default(3),
+  HEALTH_READY_SUCCESS_THRESHOLD: Joi.number().integer().min(1).default(2),
+  HEALTH_EVENT_LOOP_MAX_LAG_MS: Joi.number().integer().min(50).default(1000),
+  // Comma-separated Soroban RPC URLs for the RPC-quorum readiness check.
+  // Defaults to SOROBAN_RPC_URL.
+  SOROBAN_RPC_HEALTH_URLS: Joi.string().allow("").default(""),
 });

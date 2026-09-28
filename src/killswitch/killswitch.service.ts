@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
+import { Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit, Optional } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { KILL_SWITCH_REPOSITORY, KillSwitchRecord, KillSwitchRepository } from "./killswitch.repository";
 import {
@@ -10,6 +10,7 @@ import {
   isKillSwitchOperation,
 } from "./killswitch.types";
 import { evaluate } from "./killswitch.evaluate";
+import { GuardianStateService } from "../governance/guardian-state.service";
 
 /** Redis channel every replica subscribes to for invalidation notices. */
 export const KILL_SWITCH_CHANNEL = "vortex:killswitch:invalidate";
@@ -81,6 +82,7 @@ export class KillSwitchService implements OnModuleInit, OnModuleDestroy {
   constructor(
     @Inject(KILL_SWITCH_REPOSITORY) private readonly repo: KillSwitchRepository,
     private readonly config: ConfigService,
+    @Optional() private readonly guardian?: GuardianStateService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -117,7 +119,7 @@ export class KillSwitchService implements OnModuleInit, OnModuleDestroy {
   isBlocked(target: SwitchTarget & { operation: KillSwitchOperation }): boolean {
     try {
       if (!this.ready) return true;
-      return evaluate(this.snapshot, target).paused;
+      return this.evaluateTarget(target).paused;
     } catch (err) {
       this.log.error(`Kill-switch evaluation failed; failing closed: ${(err as Error).message}`);
       return true;
@@ -132,6 +134,24 @@ export class KillSwitchService implements OnModuleInit, OnModuleDestroy {
         matched: null,
         matchedChain: [],
       };
+    }
+    // An active on-chain guardian pause (#507) acts as a global switch that
+    // operators cannot resume; operator switches are evaluated independently,
+    // so the protocol stays paused until both sources clear.
+    const guardianPause = this.guardian?.pauseRef();
+    if (guardianPause) {
+      const entry: SwitchSnapshotEntry = {
+        scope: "global",
+        chain: null,
+        token: null,
+        operation: null,
+        active: true,
+        reasonCode: "GUARDIAN_PAUSE",
+        reason: `On-chain guardian pause (tx ${guardianPause.txHash ?? "unknown"})`,
+        activatedBy: "guardian",
+        updatedAt: Date.parse(guardianPause.since) || Date.now(),
+      };
+      return { paused: true, matched: entry, matchedChain: [entry] };
     }
     try {
       return evaluate(this.snapshot, target);

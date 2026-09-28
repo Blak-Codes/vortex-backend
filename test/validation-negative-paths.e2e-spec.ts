@@ -1,6 +1,15 @@
 import { INestApplication } from "@nestjs/common";
 import request from "supertest";
+import { Keypair } from "@stellar/stellar-sdk";
 import { createTestApp } from "./utils/create-test-app";
+import { SEED_SOLVER_KEYPAIRS } from "../src/solvers/solvers.seed";
+import { buildAcceptMessage, buildFillMessage } from "../src/common/stellar-signature";
+
+const ALPHA_KP = SEED_SOLVER_KEYPAIRS.ALPHA;
+
+function sign(kp: Keypair, msg: string): string {
+  return kp.sign(Buffer.from(msg, "utf8")).toString("base64");
+}
 
 describe("Validation Negative Paths (e2e)", () => {
   let app: INestApplication;
@@ -26,22 +35,35 @@ describe("Validation Negative Paths (e2e)", () => {
     minDstAmount: "990000",
   };
 
+  // Distinct user per create attempt so the per-user create throttle
+  // (10 / 60 s, issue #45) never trips inside this suite.
+  let userSeq = 0;
+  function body(overrides: Record<string, unknown> = {}) {
+    return {
+      ...validCreateBody,
+      user: `GE2ETESTUSER${String(++userSeq).padStart(10, "0")}`,
+      ...overrides,
+    };
+  }
+
   describe("Intent creation validation", () => {
     it("should return 400 for same-asset self-swaps on Stellar", async () => {
       const res = await request(app.getHttpServer())
         .post("/api/v1/intents")
-        .send({
-          ...validCreateBody,
-          srcChain: "stellar",
-          srcTokenAddress: validCreateBody.dstTokenContract,
-          srcTokenSymbol: "USDC",
-          srcAmount: "1000000",
-          dstTokenContract: validCreateBody.dstTokenContract,
-          dstTokenSymbol: "USDC",
-        })
+        .send(
+          body({
+            srcChain: "stellar",
+            srcTokenAddress: validCreateBody.dstTokenContract,
+            srcTokenSymbol: "USDC",
+            srcAmount: "1000000",
+            dstTokenContract: validCreateBody.dstTokenContract,
+            dstTokenSymbol: "USDC",
+          }),
+        )
         .expect(400);
 
-      expect(res.body.message).toEqual(
+      expect(res.body.error).toBe("Validation failed");
+      expect(res.body.details).toEqual(
         expect.arrayContaining([expect.stringContaining("Self-swaps are not allowed")]),
       );
     });
@@ -82,54 +104,61 @@ describe("Validation Negative Paths (e2e)", () => {
   });
 
   describe("Fill amount validation", () => {
-    async function createAndAcceptIntent() {
+    async function createAndAcceptIntent(): Promise<{ intentId: string; signature: string }> {
       const created = await request(app.getHttpServer())
         .post("/api/v1/intents")
-        .send(validCreateBody)
+        .send(body())
         .expect(201);
       const intentId = created.body.intentId;
 
+      const acceptSig = sign(ALPHA_KP, buildAcceptMessage(intentId, ALPHA_KP.publicKey()));
       await request(app.getHttpServer())
         .post(`/api/v1/intents/${intentId}/accept`)
-        .send({ solver: "SOLVER_ALPHA" })
+        .send({ solver: ALPHA_KP.publicKey(), signature: acceptSig })
         .expect(201);
 
-      return intentId;
+      return { intentId, signature: sign(ALPHA_KP, buildFillMessage(intentId, ALPHA_KP.publicKey())) };
     }
 
     it("should return 400 for malformed fillAmount (not a number)", async () => {
-      const intentId = await createAndAcceptIntent();
+      const { intentId, signature } = await createAndAcceptIntent();
       const res = await request(app.getHttpServer())
         .post(`/api/v1/intents/${intentId}/fill`)
-        .send({ solver: "SOLVER_ALPHA", fillAmount: "not-a-number", txHash: "test" })
+        .send({ solver: ALPHA_KP.publicKey(), fillAmount: "not-a-number", txHash: "test", signature })
         .expect(400);
       expect(res.body.error).toBeDefined();
     });
 
-    it("should return 400 for malformed fillAmount (BigInt overflow)", async () => {
-      const intentId = await createAndAcceptIntent();
+    it("accepts a fillAmount beyond Number.MAX_SAFE_INTEGER (BigInt has no overflow)", async () => {
+      const { intentId, signature } = await createAndAcceptIntent();
       const res = await request(app.getHttpServer())
         .post(`/api/v1/intents/${intentId}/fill`)
-        .send({ solver: "SOLVER_ALPHA", fillAmount: "999999999999999999999999999999999999999999999999", txHash: "test" })
-        .expect(400);
-      expect(res.body.error).toBeDefined();
+        .send({
+          solver: ALPHA_KP.publicKey(),
+          fillAmount: "999999999999999999999999999999999999999999999999",
+          txHash: "test",
+          signature,
+        })
+        .expect(201);
+      expect(res.body.state).toBe("filled");
+      expect(res.body.fillAmount).toBe("999999999999999999999999999999999999999999999999");
     });
 
     it("should return 400 for negative fillAmount", async () => {
-      const intentId = await createAndAcceptIntent();
+      const { intentId, signature } = await createAndAcceptIntent();
       const res = await request(app.getHttpServer())
         .post(`/api/v1/intents/${intentId}/fill`)
-        .send({ solver: "SOLVER_ALPHA", fillAmount: "-1000", txHash: "test" })
+        .send({ solver: ALPHA_KP.publicKey(), fillAmount: "-1000", txHash: "test", signature })
         .expect(400);
       expect(res.body.error).toBeDefined();
     });
 
     it("should return 400 for oversized signature strings", async () => {
-      const intentId = await createAndAcceptIntent();
+      const { intentId } = await createAndAcceptIntent();
       const res = await request(app.getHttpServer())
         .post(`/api/v1/intents/${intentId}/fill`)
         .send({
-          solver: "SOLVER_ALPHA",
+          solver: ALPHA_KP.publicKey(),
           fillAmount: "1000",
           txHash: "test",
           signature: "A".repeat(89),
@@ -168,10 +197,9 @@ describe("Validation Negative Paths (e2e)", () => {
     it("should return 400 for a well-formed but unregistered dstTokenContract", async () => {
       const res = await request(app.getHttpServer())
         .post("/api/v1/intents")
-        .send({
-          ...validCreateBody,
-          dstTokenContract: "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMZZZZZZ",
-        })
+        .send(
+          body({ dstTokenContract: "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMZZZZZZ" }),
+        )
         .expect(400);
       expect(res.body.error).toBeDefined();
     });
@@ -179,10 +207,7 @@ describe("Validation Negative Paths (e2e)", () => {
     it("should return 400 for a well-formed but unregistered srcTokenAddress on a known chain", async () => {
       const res = await request(app.getHttpServer())
         .post("/api/v1/intents")
-        .send({
-          ...validCreateBody,
-          srcTokenAddress: "0x1111111111111111111111111111111111111111",
-        })
+        .send(body({ srcTokenAddress: "0x1111111111111111111111111111111111111111" }))
         .expect(400);
       expect(res.body.error).toBeDefined();
     });
@@ -193,7 +218,7 @@ describe("Validation Negative Paths (e2e)", () => {
       const pastTimestamp = Math.floor(Date.now() / 1000) - 3600; // 1 hour ago
       const res = await request(app.getHttpServer())
         .post("/api/v1/intents")
-        .send({ ...validCreateBody, deadline: pastTimestamp })
+        .send(body({ deadline: pastTimestamp }))
         .expect(400);
       expect(res.body.error).toBeDefined();
     });
@@ -201,7 +226,7 @@ describe("Validation Negative Paths (e2e)", () => {
     it("should return 400 for deadline as negative number", async () => {
       const res = await request(app.getHttpServer())
         .post("/api/v1/intents")
-        .send({ ...validCreateBody, deadline: -1 })
+        .send(body({ deadline: -1 }))
         .expect(400);
       expect(res.body.error).toBeDefined();
     });
@@ -209,7 +234,7 @@ describe("Validation Negative Paths (e2e)", () => {
     it("should return 400 for non-numeric deadline", async () => {
       const res = await request(app.getHttpServer())
         .post("/api/v1/intents")
-        .send({ ...validCreateBody, deadline: "not-a-number" })
+        .send(body({ deadline: "not-a-number" }))
         .expect(400);
       expect(res.body.error).toBeDefined();
     });

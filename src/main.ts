@@ -1,6 +1,7 @@
 import "./tracing";
 import "reflect-metadata";
 import { NestFactory } from "@nestjs/core";
+import { NestExpressApplication } from "@nestjs/platform-express";
 import { ConfigService } from "@nestjs/config";
 import { ValidationPipe, Logger } from "@nestjs/common";
 import { WsAdapter } from "@nestjs/platform-ws";
@@ -14,6 +15,8 @@ import { HttpExceptionFilter } from "./common/http-exception.filter";
 import { initSentry } from "./common/sentry";
 import { IntentsSweeperService } from "./intents/intents-sweeper.service";
 import { BODY_SIZE_LIMIT, JSON_MAX_DEPTH } from "./config/limits.config";
+import { JobsService } from "./jobs/jobs.service";
+import { adminAuthMiddleware } from "./admin/admin.guard";
 
 // Initialise Sentry before the NestJS app boots so that any startup errors
 // are also captured.  No-op when SENTRY_DSN is not set.
@@ -62,7 +65,7 @@ function checkContractIdEnvVars(
 }
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule);
 
   // Issue #20 — trust the first proxy hop so Helmet/HSTS sees the real
   // forwarded protocol when TLS terminates upstream behind nginx/ALB.
@@ -183,6 +186,17 @@ async function bootstrap() {
   const configService = app.get(ConfigService<AppConfig, true>);
 
   checkContractIdEnvVars(configService);
+
+  // Issue #494 — graceful shutdown lets job workers finish or return in-flight
+  // jobs. Signals are listed explicitly: SIGUSR2 is the manual-sweep trigger
+  // below and must not shut the app down.
+  app.enableShutdownHooks(["SIGTERM", "SIGINT"]);
+
+  // Issue #494 — Bull Board UI (BullMQ driver only), behind admin RBAC.
+  const board = app.get(JobsService).createBoardRouter("/admin/queues");
+  if (board) {
+    app.use("/admin/queues", adminAuthMiddleware(configService.get("adminApiKeys", { infer: true })), board);
+  }
 
   // Issue #269 — operator-only manual sweep trigger (break-glass).
   // Send SIGUSR2 to the process (`kill -USR2 <pid>`) to run exactly one sweep

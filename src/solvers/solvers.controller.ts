@@ -9,7 +9,23 @@ import {
   Post,
   Query,
 } from "@nestjs/common";
+import {
+  ApiBadRequestResponse,
+  ApiNotFoundResponse,
+  ApiOkResponse,
+  ApiOperation,
+  ApiQuery,
+  ApiTags,
+  ApiUnauthorizedResponse,
+} from "@nestjs/swagger";
+import { IntentsService } from "../intents/intents.service";
+import { buildDisputeMessage, buildRegisterMessage, buildUpdateSolverMessage, verifyStellarSignature, buildSolverStatusMessage } from "../common/stellar-signature";
+import { SolversService, LeaderboardWindow, solverSupports } from "./solvers.service";
+import { ListIntentsDto } from "../intents/dto/list-intents.dto";
 import { ApiNotFoundResponse, ApiOperation, ApiQuery, ApiTags } from "@nestjs/swagger";
+import { ConfigService } from "@nestjs/config";
+import { AppConfig } from "../config/configuration";
+import { isCanaryIntent } from "../common/canary";
 import { IntentsService } from "../intents/intents.service";
 import { IntentCapabilityIndex } from "../intents/solver-intent-matcher";
 import { buildDisputeMessage, verifyStellarSignature, buildSolverStatusMessage, buildRegisterMessage } from "../common/stellar-signature";
@@ -80,7 +96,13 @@ export class SolversController {
     private readonly solversService: SolversService,
     private readonly intentsService: IntentsService,
     private readonly intentIndex: IntentCapabilityIndex,
-  ) {}
+    config: ConfigService<AppConfig, true>,
+  ) {
+    this.canary = new Set(config.get("canaryAddresses", { infer: true }) ?? []);
+  }
+
+  /** Canary addresses (issue #496) — excluded from every leaderboard. */
+  private readonly canary: ReadonlySet<string>;
 
   @Post()
   async register(@Body() dto: RegisterSolverDto) {
@@ -138,8 +160,8 @@ export class SolversController {
   @ApiQuery({ name: "window", required: false, enum: ["24h", "7d", "30d", "all"], description: "Time window over which to compute rankings." })
   async getLeaderboard(@Query("window") window: string = "all") {
     const resolvedWindow = this.normalizeWindow(window);
-    const solvers = await this.solversService.getAll();
-    const intents = await this.intentsService.getAll();
+    const solvers = (await this.solversService.getAll()).filter((s) => !this.canary.has(s.address));
+    const intents = (await this.intentsService.getAll()).filter((i) => !isCanaryIntent(i, this.canary));
     const now = Math.floor(Date.now() / 1000);
     const cutoff = resolvedWindow === "all" ? 0 : now - WINDOW_SECONDS[resolvedWindow];
 
@@ -197,9 +219,9 @@ export class SolversController {
 
   @Get()
   async getLegacyLeaderboard() {
-    const solvers = (await this.solversService.getAll()).sort(
-      (a, b) => b.fillsCompleted - a.fillsCompleted,
-    );
+    const solvers = (await this.solversService.getAll())
+      .filter((s) => !this.canary.has(s.address))
+      .sort((a, b) => b.fillsCompleted - a.fillsCompleted);
     return { solvers, count: solvers.length };
   }
 
@@ -234,6 +256,29 @@ export class SolversController {
 
   async getSolver(@Param("address") address: string) {
     const solver = await this.solversService.get(address);
+    if (!solver) throw new NotFoundException("Solver not found");
+    return solver;
+  }
+
+  /**
+   * PATCH /api/v1/solvers/:address
+   *
+   * Issue #273 — lets a solver operator edit their mutable profile fields
+   * (`name`, `supportedChains`, `supportedTokens`, `avgFillTime`). Signature
+   * verified per the repo's `verifyStellarSignature` convention: the operator
+   * proves control of `:address` before any write. Immutable fields are
+   * stripped by the DTO whitelist.
+   */
+  @Patch(":address")
+  @ApiOkResponse({ description: "Updated solver record" })
+  @ApiBadRequestResponse({ description: "Invalid update body" })
+  @ApiUnauthorizedResponse({ description: "Missing or invalid signature" })
+  @ApiNotFoundResponse({ description: "Solver not found" })
+  async updateSolver(@Param("address") address: string, @Body() dto: UpdateSolverDto) {
+    verifyStellarSignature(address, buildUpdateSolverMessage(address), dto.signature);
+
+    const { signature: _signature, ...patch } = dto;
+    const solver = await this.solversService.update(address, patch);
     if (!solver) throw new NotFoundException("Solver not found");
     return solver;
   }

@@ -48,6 +48,7 @@ import { AppConfig, FeePercentile, NETWORK_PASSPHRASES } from "../config/configu
 import { classifySimulationResponse } from "./shadow-divergence";
 import { SorobanService } from "./soroban.service";
 import { SignerService } from "./signer.service";
+import { FeatureFlagService } from "../flags/feature-flag.service";
 import { TxConfirmationService } from "./tx-confirmation.service";
 import { MetricsService } from "../metrics/metrics.service";
 import { KillSwitchService } from "../killswitch/killswitch.service";
@@ -162,6 +163,7 @@ export class StellarTxService {
     configService: ConfigService<AppConfig, true>,
     @Optional() private readonly metricsService?: MetricsService,
     private readonly killSwitch: KillSwitchService,
+    @Optional() private readonly flags?: FeatureFlagService,
   ) {
     this.feePercentile = configService.get("stellar.feePercentile", { infer: true });
     this.dryRun = configService.get("onchainDryRun", { infer: true });
@@ -273,7 +275,12 @@ export class StellarTxService {
     // while on-chain writes are simulated.
     this.assertOnChainWriteAllowed(params.method);
 
-    if (this.dryRun) {
+    // ONCHAIN_DRY_RUN is the default; the `onchain-dry-run` runtime flag
+    // (issue #495) can override it without a restart.
+    const dryRun = this.flags
+      ? await this.flags.getBooleanValue("onchain-dry-run", { chain: "stellar" })
+      : this.dryRun;
+    if (dryRun) {
       this.logger.log(
         `[dry-run] invokeContract contractId=${params.contractId} method=${params.method} ` +
         `— simulating only, ONCHAIN_DRY_RUN=true (no transaction submitted)`,
@@ -486,6 +493,9 @@ export class StellarTxService {
       }
       throw err;
     }
+  }
+
+  /**
    * Simulates a contract invocation **without ever submitting it** (issue #401).
    *
    * This is the only RPC call the shadow-mode divergence monitor is allowed to

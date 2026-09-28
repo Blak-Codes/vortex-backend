@@ -94,12 +94,39 @@ code path (`StellarTxService.invokeContract`, `SolverRegistryService.slashSolver
 build and simulate a Soroban transaction, log what *would* be submitted, and
 return without broadcasting it.
 
-**Runtime-toggleable limitation:** The flag is loaded from environment config at
-process start. Changing it requires a process restart — there is no hot-reload
-HTTP endpoint for this iteration. This is an intentional simplification: the
-staged rollout procedure below is designed around restart windows (not hot flips),
-and the cost of a restart in staging is negligible compared to the risk of a
-silent live-mode activation. A live-toggle mechanism is a separate future concern.
+**Runtime toggle (issue #495):** `ONCHAIN_DRY_RUN` is now the *default* for the
+`onchain-dry-run` runtime feature flag; `ONCHAIN_INTENTS_ENABLED` likewise
+defaults the `onchain-intents-enabled` flag. Both can be changed without a
+restart through the admin API, take effect on every instance within a pub/sub
+hop (or `FLAGS_REFRESH_MS` at worst), and every change is written to
+`admin_audit_log`:
+
+```bash
+# Inspect current state (env default, override pin, stored rules)
+curl -H "x-admin-key: $ADMIN_KEY" http://localhost:4000/admin/flags
+
+# Stage 2 example: live writes only for one solver, dry-run for everyone else
+curl -X PUT -H "x-admin-key: $ADMIN_KEY" -H 'content-type: application/json' \
+  -d '{"defaultValue":true,"rules":[{"value":false,"solvers":["G..."]}],"reason":"stage 2 shadow writes"}' \
+  http://localhost:4000/admin/flags/onchain-dry-run
+```
+
+Rules are evaluated in order (first match wins) and can target solver
+allowlists, chains and deterministic percentages.
+
+- **Two approvals:** in production any `onchain-dry-run` state that can
+  resolve to `false` returns `{ "status": "pending", "requestId": ... }`. A
+  *different* admin applies it with
+  `POST /admin/flags/change-requests/<requestId>/approve`. Turning dry-run back
+  **on** never needs a second approval.
+- **Break-glass pin:** `FLAG_OVERRIDES=onchain-dry-run=true` wins over any
+  stored state (requires a restart, by design).
+- **Guardian freeze:** a guardian `guardian_freeze` on the flag key (or `*`)
+  blocks changes until unfrozen.
+- **Consistency:** each HTTP request evaluates against one flag snapshot; if
+  the database is unreachable the last-known state (or env default) is served.
+- Store modes (`INTENTS_PERSISTENCE` / `SOLVERS_PERSISTENCE`) stay
+  restart-only: the repository adapter is bound at startup.
 
 **Production requirement:** `ONCHAIN_DRY_RUN` must be explicitly set in any
 `NODE_ENV=production` environment — the process refuses to start without it
@@ -113,9 +140,10 @@ How it factors into cutover staging:
    still served from the in-memory store). This validates that transaction
    construction, contract ID wiring, and the signing key all work, with
    zero funds-moving risk. This is pre-check #2 above.
-2. **Stage 2 — shadow writes.** Flip `ONCHAIN_DRY_RUN=false` for a canary slice (or a
-   single non-critical path, e.g. solver-registry reads before slashing
-   writes) while the in-memory store remains authoritative for reads. Watch
+2. **Stage 2 — shadow writes.** Turn `onchain-dry-run` off for a targeted slice
+   through the flag API (solver allowlist or percentage, two approvals), or a
+   single non-critical path (e.g. solver-registry reads before slashing
+   writes), while the in-memory store remains authoritative for reads. Watch
    for transaction failures, unexpected fees, or confirmation-latency
    surprises.
 3. **Stage 3 — cutover.** Flip the in-memory store from authoritative to
