@@ -35,16 +35,29 @@ async function createAppWithOrigin(origin: string): Promise<INestApplication> {
   return app;
 }
 
-async function createAppWithSecurityHeaders(): Promise<INestApplication> {
+async function createAppWithSecurityHeaders(nodeEnv = "development"): Promise<INestApplication> {
+  const previousNodeEnv = process.env.NODE_ENV;
+  process.env.NODE_ENV = nodeEnv;
+
   const moduleRef = await Test.createTestingModule({
     imports: [AppModule],
   }).compile();
 
   const app = moduleRef.createNestApplication();
   app.set("trust proxy", 1);
+  app.use((req, res, next) => {
+    const isDocsRequest = req.path === "/docs" || req.path === "/docs-json";
+    if (isDocsRequest) {
+      res.setHeader("Cache-Control", "no-store");
+    }
+    next();
+  });
   app.use(
     helmet({
       hsts: { maxAge: 31536000, includeSubDomains: true, preload: true },
+      frameguard: { action: "deny" },
+      referrerPolicy: { policy: "strict-origin-when-cross-origin" },
+      noSniff: true,
     }),
   );
   app.useWebSocketAdapter(new WsAdapter(app));
@@ -52,6 +65,8 @@ async function createAppWithSecurityHeaders(): Promise<INestApplication> {
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
 
   await app.init();
+
+  process.env.NODE_ENV = previousNodeEnv;
   return app;
 }
 
@@ -117,6 +132,27 @@ describe("CORS (e2e)", () => {
 
       expect(res.headers["strict-transport-security"]).toContain("max-age=31536000");
       expect(res.headers["x-content-type-options"]).toBe("nosniff");
+      expect(res.headers["x-frame-options"]).toBe("DENY");
+      expect(res.headers["referrer-policy"]).toBe("strict-origin-when-cross-origin");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("marks OpenAPI docs as no-store so they are not cached", async () => {
+    const app = await createAppWithSecurityHeaders();
+    try {
+      const res = await request(app.getHttpServer()).get("/docs-json").expect(200);
+      expect(res.headers["cache-control"]).toContain("no-store");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("disables Swagger UI by default in production", async () => {
+    const app = await createAppWithSecurityHeaders("production");
+    try {
+      await request(app.getHttpServer()).get("/docs").expect(404);
     } finally {
       await app.close();
     }

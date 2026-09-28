@@ -171,6 +171,8 @@ export interface AppConfig {
      * comfortably under the 5 s propagation requirement.
      */
     pollMs: number;
+  };
+
   /**
    * Shadow-mode divergence monitor (issue #401).
    *
@@ -195,6 +197,8 @@ export interface AppConfig {
      * `contract_unconfigured` rather than as zero divergence.
      */
     sourceAccount: string;
+  };
+
   governance: {
     /**
      * On-chain governance / parameters contract ID.
@@ -208,6 +212,8 @@ export interface AppConfig {
      * Default: 30 000 ms (30 s).
      */
     paramsPollIntervalMs: number;
+  };
+
   leaderElection: {
     /** When false, all workers run unconditionally (pre-election behaviour). */
     enabled: boolean;
@@ -267,6 +273,7 @@ export default (): AppConfig => ({
     // 2000 ms + request latency stays well inside the 5 s propagation budget
     // even when Redis is unavailable.
     pollMs: parseInt(process.env.KILLSWITCH_POLL_MS ?? "2000", 10),
+  },
   shadow: {
     // Off by default: the monitor costs one simulation per sampled transition,
     // so it is opt-in per environment rather than something a deployer
@@ -276,9 +283,11 @@ export default (): AppConfig => ({
     queueMax: clampPositiveInt(process.env.SHADOW_QUEUE_MAX, 256),
     concurrency: clampPositiveInt(process.env.SHADOW_CONCURRENCY, 4),
     sourceAccount: process.env.SHADOW_SOURCE_ACCOUNT ?? "",
+  },
   governance: {
     paramsContractId: process.env.PARAMS_CONTRACT_ID ?? "",
     paramsPollIntervalMs: parseInt(process.env.PARAMS_POLL_INTERVAL_MS ?? "30000", 10),
+  },
   leaderElection: {
     enabled: (process.env.LEADER_ELECTION_ENABLED ?? "false") === "true",
     heartbeatMs: parseInt(process.env.LEADER_ELECTION_HEARTBEAT_MS ?? "5000", 10),
