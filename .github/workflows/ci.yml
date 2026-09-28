@@ -580,6 +580,21 @@ jobs:
           push: false
           tags: vortex-backend:ci
 
+  # ── Solver SDK (issue #446): build + publish dry-run on every PR ───────────
+  solver-sdk:
+    name: Solver SDK – build + publish dry-run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run check:version -w @vortex/solver-sdk
+      - run: npm run build -w @vortex/solver-sdk
+      - run: npm publish -w @vortex/solver-sdk --dry-run
+
   sdk-publish:
     name: Publish generated SDK
     runs-on: ubuntu-latest

@@ -7,6 +7,8 @@ import { IntentsSweeperService } from "./intents-sweeper.service";
 import { INTENTS_REPOSITORY, InMemoryIntentsRepository } from "./intents.repository";
 import { PrismaIntentsRepository } from "./prisma-intents.repository";
 import { IntentCapabilityIndex } from "./solver-intent-matcher";
+import { backplaneProvider } from "./backplane/backplane.factory";
+import { backplaneHealthIndicator } from "./backplane/backplane-health.provider";
 import { SolversModule } from "../solvers/solvers.module";
 import { RoutingModule } from "../routing/routing.module";
 import { TokensModule } from "../tokens/tokens.module";
@@ -47,7 +49,9 @@ import { GovernanceModule } from "../governance/governance.module";
     },
     IntentsService,
     IntentCapabilityIndex,
+    backplaneProvider,
     IntentsGateway,
+    backplaneHealthIndicator,
     IntentsSweeperService,
     // Note: EventIngestionService is provided by SorobanModule (imported above)
     // and exported from there — no re-declaration needed here.

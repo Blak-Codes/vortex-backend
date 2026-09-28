@@ -201,16 +201,6 @@ export class SolversService {
   }
 
   /**
-   * Records that a solver successfully filled an intent.
-   * Increments fillsCompleted and updates lastActiveAt.
-   */
-  async recordSuccessfulFill(address: string): Promise<SolverRecord | null> {
-    const solver = await this.repo.findByAddress(address);
-    if (!solver) return null;
-    const updated = {
-      ...solver,
-      fillsCompleted: solver.fillsCompleted + 1,
-      lastActiveAt: Math.floor(Date.now() / 1000),
    * Records a successful fill for `address`.
    *
    * Bumps `fillsCompleted`, adds `fillAmount` to the cumulative `totalVolume`,

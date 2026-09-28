@@ -15,8 +15,10 @@
 4. [Scenario A — Soroban RPC downtime](#scenario-a--soroban-rpc-downtime)
 5. [Scenario B — Stuck or slow sweeper](#scenario-b--stuck-or-slow-sweeper)
 6. [Scenario C — Emergency kill-switch](#scenario-c--emergency-killswitch-issue-477)
-7. [Key configuration](#key-configuration)
-8. [Escalation path](#escalation-path)
+7. [Health probes](#health-probes)
+8. [Scenario D — WebSocket backplane and slow consumers](#scenario-d--websocket-backplane-and-slow-consumers)
+9. [Key configuration](#key-configuration)
+10. [Escalation path](#escalation-path)
 
 ---
 
@@ -356,6 +358,92 @@ first approval.
 If writes are being refused but no switch is listed, the replica has not loaded
 its snapshot and is failing closed. `ready: false` in `/health` points at the
 database. See "Failure modes" in [killswitch.md](./killswitch.md).
+
+---
+
+## Health probes
+
+Issue #492. All three probes read results cached by a background checker
+(every `HEALTH_CHECK_INTERVAL_MS`), so they answer in < 50 ms whatever the
+dependencies are doing.
+
+| Endpoint | Meaning | Fails (503) when |
+|---|---|---|
+| `GET /health/live` | Process is responsive | Event-loop delay > `HEALTH_EVENT_LOOP_MAX_LAG_MS`. Dependency outages never fail it, so pods are not restarted during an outage. |
+| `GET /health/ready` | Can serve its roles (`SERVICE_ROLES`) | An indicator critical to one of those roles is down for `HEALTH_READY_FAILURE_THRESHOLD` consecutive checks. It turns ready again after `HEALTH_READY_SUCCESS_THRESHOLD` passes (hysteresis). `status: "degraded"` = a non-critical dependency is down. |
+| `GET /health/startup` | Migrations applied, caches warmed | Until every startup indicator has passed once. |
+| `GET /health` | Legacy aggregate (unchanged, plus `backplane`) | Never |
+
+Indicators (`indicators` in the `/health/ready` body, with `critical`, `error`, `details`):
+
+| Indicator | Critical for | Notes |
+|---|---|---|
+| `database` | api, worker — only when a `*_PERSISTENCE=prisma` adapter is used | `SELECT 1` |
+| `migrations` | startup | Every directory in `prisma/migrations` is applied in `_prisma_migrations` |
+| `soroban_rpc_quorum` | worker | Majority of `SOROBAN_RPC_HEALTH_URLS` answer `getHealth` = healthy |
+| `ws_backplane` | ws — when `WS_BACKPLANE=redis` | Replica can read the Redis stream |
+| `killswitch_snapshot` | api, startup | Kill-switch snapshot loaded (writes fail closed without it) |
+
+Metrics: `vortex_health_ready`, `vortex_health_indicator_up{indicator}`,
+`vortex_health_check_duration_seconds{indicator}`.
+
+Kubernetes probes (split deployments set `SERVICE_ROLES` per workload, e.g.
+`api,ws` for HTTP pods and `worker` for workers):
+
+```yaml
+startupProbe:
+  httpGet: { path: /health/startup, port: 4000 }
+  periodSeconds: 5
+  failureThreshold: 60      # up to 5 min for migrations + cache warm-up
+livenessProbe:
+  httpGet: { path: /health/live, port: 4000 }
+  periodSeconds: 10
+  failureThreshold: 3
+readinessProbe:
+  httpGet: { path: /health/ready, port: 4000 }
+  periodSeconds: 5
+  failureThreshold: 1       # hysteresis is applied server-side
+```
+
+---
+
+## Scenario D — WebSocket backplane and slow consumers
+
+**Backplane (issue #454).** With `WS_BACKPLANE=redis` every replica publishes
+events into a Redis stream (`vortex:ws:events`) with a global sequence number
+(`vortex:ws:seq`) and delivers from that stream, so clients on any replica
+see the same events, in the same order, with the same `seq`, and replay works
+against any replica. Publishing is queued in the background — request
+handlers never wait for Redis.
+
+- **Redis down:** `/health/ready` on WS-role pods goes 503 (`ws_backplane`
+  down) and `vortex_ws_backplane_connected` drops to 0. Publishes queue
+  (bounded) and are retried in order; on recovery each replica resumes the
+  stream from the last event it delivered — no loss, duplicates or
+  reordering. Watch `vortex_ws_backplane_dropped_total{reason="queue_full"}`
+  for events dropped during a long outage.
+- **Latency:** `vortex_ws_backplane_publish_duration_seconds`.
+
+**Connection limits and slow consumers (issue #455).**
+
+- Connections over `WS_MAX_CONNECTIONS` or `WS_MAX_CONNECTIONS_PER_IP` are
+  closed with 1013 (`vortex_ws_connections_rejected_total{reason}`). Behind a
+  load balancer set `WS_TRUST_PROXY_HOPS` to the number of proxies, or every
+  client shares the proxy's IP.
+- Clients over the inbound token bucket get `rate_limited` frames and are
+  closed with 1008 after `WS_RATE_LIMIT_MAX_VIOLATIONS`
+  (`vortex_ws_rate_limited_total{action}`). Frames over
+  `WS_MAX_PAYLOAD_BYTES` close the socket with 1009.
+- Slow consumers: once a socket's buffer passes `WS_OUTBOUND_BUFFER_BYTES`,
+  messages queue (at most `WS_OUTBOUND_QUEUE_MAX`); beyond that the oldest are
+  dropped (`vortex_ws_outbound_dropped_total`) or, with
+  `WS_SLOW_CONSUMER_POLICY=disconnect`, the client is closed
+  (`vortex_ws_slow_consumer_disconnects_total`). Clients recover dropped
+  events with `replay` — the solver SDK does this automatically.
+- Solvers can authenticate with a SEP-10 JWT (`?token=`, `Authorization:
+  Bearer`, or `{ "type": "auth", "token" }`) when `AUTH_JWT_SECRET` is set,
+  in addition to signed `auth` frames. Anonymous connections still receive
+  the public feed.
 
 ---
 

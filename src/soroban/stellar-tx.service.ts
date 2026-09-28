@@ -486,6 +486,9 @@ export class StellarTxService {
       }
       throw err;
     }
+  }
+
+  /**
    * Simulates a contract invocation **without ever submitting it** (issue #401).
    *
    * This is the only RPC call the shadow-mode divergence monitor is allowed to

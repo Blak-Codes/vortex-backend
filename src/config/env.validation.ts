@@ -302,4 +302,33 @@ export const envValidationSchema = Joi.object({
   // acquire the lock and leaders renew it. Lower values reduce failover time
   // but increase DB load. Default 5 s gives ≤ 15 s failover.
   LEADER_ELECTION_HEARTBEAT_MS: Joi.number().integer().min(1000).max(60000).default(5000),
+
+  // ── WS gateway hardening (issue #455) ─────────────────────────────────────
+  WS_MAX_PAYLOAD_BYTES: Joi.number().integer().min(1024).default(16384),
+  WS_MAX_CONNECTIONS_PER_IP: Joi.number().integer().min(0).default(20),
+  // Hops of trusted reverse proxies in front of the service. 0 ignores
+  // X-Forwarded-For entirely so clients cannot spoof their IP.
+  WS_TRUST_PROXY_HOPS: Joi.number().integer().min(0).default(0),
+  WS_RATE_LIMIT_PER_SEC: Joi.number().positive().default(10),
+  WS_RATE_LIMIT_BURST: Joi.number().integer().min(1).default(20),
+  WS_RATE_LIMIT_MAX_VIOLATIONS: Joi.number().integer().min(1).default(5),
+  WS_OUTBOUND_QUEUE_MAX: Joi.number().integer().min(1).default(1000),
+  WS_OUTBOUND_BUFFER_BYTES: Joi.number().integer().min(1024).default(1048576),
+  WS_SLOW_CONSUMER_POLICY: Joi.string().valid("drop_oldest", "disconnect").default("drop_oldest"),
+  // HS256 secret shared with the SEP-10 auth endpoint (#442). Empty disables
+  // JWT auth; signature auth keeps working.
+  AUTH_JWT_SECRET: Joi.string().allow("").min(32).default(""),
+
+  // ── Health probes (issue #492) ────────────────────────────────────────────
+  // Comma-separated roles this process serves: api, ws, worker.
+  SERVICE_ROLES: Joi.string()
+    .pattern(/^(api|ws|worker)(,(api|ws|worker))*$/)
+    .default("api,ws,worker"),
+  HEALTH_CHECK_INTERVAL_MS: Joi.number().integer().min(500).default(5000),
+  HEALTH_READY_FAILURE_THRESHOLD: Joi.number().integer().min(1).default(3),
+  HEALTH_READY_SUCCESS_THRESHOLD: Joi.number().integer().min(1).default(2),
+  HEALTH_EVENT_LOOP_MAX_LAG_MS: Joi.number().integer().min(50).default(1000),
+  // Comma-separated Soroban RPC URLs for the RPC-quorum readiness check.
+  // Defaults to SOROBAN_RPC_URL.
+  SOROBAN_RPC_HEALTH_URLS: Joi.string().allow("").default(""),
 });

@@ -5,6 +5,8 @@ WORKDIR /app
 # Install all deps (including dev) so the NestJS compiler and Prisma generator
 # are available.
 COPY package*.json ./
+# npm workspaces (issue #446): the workspace manifest must exist before install.
+COPY packages/solver-sdk/package.json ./packages/solver-sdk/
 RUN npm install
 
 # Copy source + Prisma schema before generating so the client is built from the
@@ -23,6 +25,7 @@ ENV NODE_ENV=production
 
 # Install production-only deps and keep the runtime image slim.
 COPY package*.json ./
+COPY packages/solver-sdk/package.json ./packages/solver-sdk/
 RUN npm ci --omit=dev --ignore-scripts=false && npm cache clean --force
 
 # Copy generated Prisma client and migration files so `migrate deploy` works at

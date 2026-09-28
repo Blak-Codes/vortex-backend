@@ -31,12 +31,28 @@ services:
       DATABASE_URL: postgresql://vortex:vortex@postgres:5432/vortex?schema=public
       CORS_ORIGIN: "*"
       WS_MAX_CONNECTIONS: 1000
-      WS_BACKPLANE: memory
+      # Issue #454 — `WS_BACKPLANE=redis docker compose --profile backplane up`
+      # fans WS events out through the redis service below.
+      WS_BACKPLANE: ${WS_BACKPLANE:-memory}
+      REDIS_URL: redis://redis:6379
     ports:
       - "4000:4000"
     volumes:
       - .:/app
     command: sh -c "npx prisma migrate deploy && npm run dev -- --host 0.0.0.0"
+
+  redis:
+    image: redis:7-alpine
+    container_name: vortex-redis
+    restart: unless-stopped
+    profiles: ["backplane"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   # ── Observability profile (issue #481) ─────────────────────────────────────
   # Brought up with:  docker compose --profile observability up -d
