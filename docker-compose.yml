@@ -1,6 +1,8 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    # TimescaleDB is a PostgreSQL extension and a drop-in replacement; it powers
+    # the analytics continuous aggregates (docs/adr/0001-analytics-store.md).
+    image: timescale/timescaledb:2.16.1-pg16
     container_name: vortex-postgres
     restart: unless-stopped
     environment:

@@ -10,6 +10,7 @@ import { StatsModule } from "./stats/stats.module";
 import { SorobanModule } from "./soroban/soroban.module";
 import { RoutingModule } from "./routing/routing.module";
 import { PrismaModule } from "./prisma/prisma.module";
+import { AnalyticsModule } from "./analytics/analytics.module";
 
 @Module({
   imports: [
@@ -30,6 +31,7 @@ import { PrismaModule } from "./prisma/prisma.module";
     StatsModule,
     SorobanModule,
     RoutingModule,
+    AnalyticsModule,
   ],
   controllers: [],
   providers: [

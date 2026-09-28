@@ -54,6 +54,10 @@ Commit message format is enforced via [commitlint](https://commitlint.js.org/) s
 - Typed Swagger response documentation for every `SorobanController` and
   `TokensController` route, including the account route's 400/429 responses
   (Closes #271)
+- `src/analytics/` — analytics layer over TimescaleDB continuous aggregates
+  (ADR-0001) with `GET /api/v1/analytics/{volume,fees,latency,solver-share}`
+  endpoints (`interval`, `from`, `to`, `chain`, `token` params), idempotent
+  event-driven ingestion, 1m/1h/1d rollups with retention, and historical backfill
 
 ### Fixed
 - `IntentsService.create()` idempotency-key handling is now race-safe — concurrent
