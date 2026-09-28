@@ -87,3 +87,17 @@ export function buildSolverStatusMessage(action: "deactivate" | "reactivate" | "
 export function buildDisputeMessage(slashId: string, address: string, reason: string): string {
   return `dispute:${slashId}:${address}:${reason}`;
 }
+
+/**
+ * Build the canonical message a reviewer must sign to move a dispute into review.
+ */
+export function buildDisputeReviewMessage(disputeId: string): string {
+  return `dispute-review:${disputeId}`;
+}
+
+/**
+ * Build the canonical message a reviewer must sign to decide a dispute.
+ */
+export function buildDisputeDecisionMessage(disputeId: string, resolution: string, reason: string): string {
+  return `dispute-decision:${disputeId}:${resolution}:${reason}`;
+}

@@ -153,3 +153,64 @@ model Token {
   @@index([symbol])
   @@map("tokens")
 }
+
+// ─── Dispute ─────────────────────────────────────────────────────────────────
+// A solver's appeal of a slash. Immutable once decided (decidedAt set); the
+// lifecycle is open → under_review → upheld | overturned.
+
+enum DisputeStatus {
+  open
+  under_review
+  upheld
+  overturned
+}
+
+model Dispute {
+  id               String        @id @default(uuid()) @map("id")
+  /// Externally-visible dispute identifier.
+  disputeId        String        @unique @map("dispute_id")
+  /// The slash being contested.
+  slashId          String        @map("slash_id")
+  /// Solver address that filed the dispute.
+  solver           String        @map("solver")
+  /// Intent the slash was issued against.
+  intentId         String        @map("intent_id")
+  reason           String        @map("reason")
+  /// Evidence (tx hashes, logs, note) stored as JSON.
+  evidence         Json          @map("evidence")
+  status           DisputeStatus @default(open) @map("status")
+  /// Unix epoch seconds the dispute was filed.
+  submittedAt      Int           @map("submitted_at")
+  /// Unix epoch seconds by which review must complete (SLA).
+  deadline         Int           @map("deadline")
+  /// Automated evidence-verification result (fill-verifier).
+  autoVerification Json          @map("auto_verification")
+  decidedAt        Int?          @map("decided_at")
+  decidedBy        String?       @map("decided_by")
+  decisionReason   String?       @map("decision_reason")
+
+  @@index([slashId])
+  @@index([solver])
+  @@index([status])
+  @@map("disputes")
+}
+
+// ─── TreasuryRefundRequest ───────────────────────────────────────────────────
+// Record of a treasury refund requested when a dispute is overturned. The
+// on-chain compensation itself is out of scope (manual/separate process).
+
+model TreasuryRefundRequest {
+  id        String  @id @default(uuid()) @map("id")
+  refundId  String  @unique @map("refund_id")
+  disputeId String  @map("dispute_id")
+  solver    String  @map("solver")
+  slashId   String  @map("slash_id")
+  /// Slashed amount to refund (base-unit string), when known.
+  amount    String? @map("amount")
+  status    String  @default("pending") @map("status")
+  createdAt Int     @map("created_at")
+
+  @@index([solver])
+  @@index([disputeId])
+  @@map("treasury_refund_requests")
+}
