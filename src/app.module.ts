@@ -22,6 +22,7 @@ import { AdminModule } from "./admin/admin.module";
 import { JobsModule } from "./jobs/jobs.module";
 import { FlagsModule } from "./flags/flags.module";
 import { GuardianStateModule } from "./governance/guardian-state.service";
+import { DatasetsModule } from "./datasets/datasets.module";
 
 @Module({
   imports: [
