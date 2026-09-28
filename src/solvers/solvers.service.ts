@@ -169,13 +169,6 @@ export class SolversService {
   }
 
   /**
-   * Bumps lastActiveAt on a successful fill. Called by IntentsController.fill()
-   * after fillIfAccepted() succeeds.
-   */
-  async recordSuccessfulFill(address: string): Promise<SolverRecord | null> {
-    const solver = await this.repo.findByAddress(address);
-    if (!solver) return null;
-    const updated = { ...solver, lastActiveAt: Math.floor(Date.now() / 1000) };
    * Register a solver from an on-chain SolverRegistered event (issue #399).
    *
    * Creates a new solver record with source="chain" and the bond amount
@@ -233,34 +226,6 @@ export class SolversService {
   }
 
   /**
-   * Apply a partial update to a solver's mutable profile fields
-   * (`name`, `supportedChains`, `supportedTokens`, `avgFillTime`) — issue #273.
-   *
-   * `undefined` values in `patch` are ignored so an absent field never clears
-   * existing data. Returns `undefined` when no solver exists for `address`.
-   */
-  async update(
-    address: string,
-    patch: Partial<Pick<SolverRecord, "name" | "supportedChains" | "supportedTokens" | "avgFillTime">>,
-  ): Promise<SolverRecord | undefined> {
-    const solver = await this.repo.findByAddress(address);
-    if (!solver) return undefined;
-
-    const applied = Object.fromEntries(
-      Object.entries(patch).filter(([, value]) => value !== undefined),
-    ) as Partial<SolverRecord>;
-
-    const updated: SolverRecord = { ...solver, ...applied };
-   * Records that a solver successfully filled an intent.
-   * Increments fillsCompleted and updates lastActiveAt.
-   */
-  async recordSuccessfulFill(address: string): Promise<SolverRecord | null> {
-    const solver = await this.repo.findByAddress(address);
-    if (!solver) return null;
-    const updated = {
-      ...solver,
-      fillsCompleted: solver.fillsCompleted + 1,
-      lastActiveAt: Math.floor(Date.now() / 1000),
    * Records a successful fill for `address`.
    *
    * Bumps `fillsCompleted`, adds `fillAmount` to the cumulative `totalVolume`,

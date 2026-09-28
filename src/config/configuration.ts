@@ -171,6 +171,7 @@ export interface AppConfig {
      * comfortably under the 5 s propagation requirement.
      */
     pollMs: number;
+  };
   /**
    * Shadow-mode divergence monitor (issue #401).
    *
@@ -195,6 +196,7 @@ export interface AppConfig {
      * `contract_unconfigured` rather than as zero divergence.
      */
     sourceAccount: string;
+  };
   governance: {
     /**
      * On-chain governance / parameters contract ID.
@@ -208,6 +210,7 @@ export interface AppConfig {
      * Default: 30 000 ms (30 s).
      */
     paramsPollIntervalMs: number;
+  };
   leaderElection: {
     /** When false, all workers run unconditionally (pre-election behaviour). */
     enabled: boolean;
@@ -239,6 +242,42 @@ export interface AppConfig {
   guardianContractId: string;
   /** Addresses (users and solvers) owned by the synthetic canary (issue #496). */
   canaryAddresses: string[];
+  /** WS gateway hardening (issue #455). */
+  ws: {
+    /** Largest inbound frame accepted; larger frames close the socket (1009). */
+    maxPayloadBytes: number;
+    /** Concurrent connections allowed from one client IP (0 = unlimited). */
+    maxConnectionsPerIp: number;
+    /** Reverse-proxy hops to trust when reading X-Forwarded-For (0 = use the socket address). */
+    trustProxyHops: number;
+    /** Inbound token bucket: sustained messages per second and burst size. */
+    rateLimitPerSec: number;
+    rateLimitBurst: number;
+    /** Rate-limited messages tolerated before the connection is closed (1008). */
+    rateLimitMaxViolations: number;
+    /** Messages held for a slow consumer before the slow-consumer policy applies. */
+    outboundQueueMax: number;
+    /** Socket bufferedAmount above which further messages are queued instead of sent. */
+    outboundBufferBytes: number;
+    slowConsumerPolicy: "drop_oldest" | "disconnect";
+  };
+  /** HS256 secret for solver JWTs (SEP-10 auth, #442); empty disables JWT auth. */
+  authJwtSecret: string;
+  /** Health probes (issue #492). */
+  health: {
+    /** Roles this process serves; readiness requires every indicator critical to any of them. */
+    roles: Array<"api" | "ws" | "worker">;
+    /** Background re-check interval; probes only read cached results. */
+    checkIntervalMs: number;
+    /** Consecutive failed evaluations before readiness turns false. */
+    readyFailureThreshold: number;
+    /** Consecutive passing evaluations before readiness turns true again. */
+    readySuccessThreshold: number;
+    /** Event-loop delay above which liveness fails. */
+    eventLoopMaxLagMs: number;
+    /** Soroban RPC endpoints probed for quorum (majority must be healthy). */
+    rpcHealthUrls: string[];
+  };
 }
 
 export default (): AppConfig => ({
@@ -292,6 +331,7 @@ export default (): AppConfig => ({
     // 2000 ms + request latency stays well inside the 5 s propagation budget
     // even when Redis is unavailable.
     pollMs: parseInt(process.env.KILLSWITCH_POLL_MS ?? "2000", 10),
+  },
   shadow: {
     // Off by default: the monitor costs one simulation per sampled transition,
     // so it is opt-in per environment rather than something a deployer
@@ -301,9 +341,11 @@ export default (): AppConfig => ({
     queueMax: clampPositiveInt(process.env.SHADOW_QUEUE_MAX, 256),
     concurrency: clampPositiveInt(process.env.SHADOW_CONCURRENCY, 4),
     sourceAccount: process.env.SHADOW_SOURCE_ACCOUNT ?? "",
+  },
   governance: {
     paramsContractId: process.env.PARAMS_CONTRACT_ID ?? "",
     paramsPollIntervalMs: parseInt(process.env.PARAMS_POLL_INTERVAL_MS ?? "30000", 10),
+  },
   leaderElection: {
     enabled: (process.env.LEADER_ELECTION_ENABLED ?? "false") === "true",
     heartbeatMs: parseInt(process.env.LEADER_ELECTION_HEARTBEAT_MS ?? "5000", 10),
@@ -324,6 +366,32 @@ export default (): AppConfig => ({
     .split(",")
     .map((a) => a.trim())
     .filter(Boolean),
+  ws: {
+    maxPayloadBytes: parseInt(process.env.WS_MAX_PAYLOAD_BYTES ?? "16384", 10),
+    maxConnectionsPerIp: parseInt(process.env.WS_MAX_CONNECTIONS_PER_IP ?? "20", 10),
+    trustProxyHops: parseInt(process.env.WS_TRUST_PROXY_HOPS ?? "0", 10),
+    rateLimitPerSec: Number(process.env.WS_RATE_LIMIT_PER_SEC ?? "10"),
+    rateLimitBurst: parseInt(process.env.WS_RATE_LIMIT_BURST ?? "20", 10),
+    rateLimitMaxViolations: parseInt(process.env.WS_RATE_LIMIT_MAX_VIOLATIONS ?? "5", 10),
+    outboundQueueMax: parseInt(process.env.WS_OUTBOUND_QUEUE_MAX ?? "1000", 10),
+    outboundBufferBytes: parseInt(process.env.WS_OUTBOUND_BUFFER_BYTES ?? "1048576", 10),
+    slowConsumerPolicy: (process.env.WS_SLOW_CONSUMER_POLICY ?? "drop_oldest") as AppConfig["ws"]["slowConsumerPolicy"],
+  },
+  authJwtSecret: process.env.AUTH_JWT_SECRET ?? "",
+  health: {
+    roles: (process.env.SERVICE_ROLES ?? "api,ws,worker")
+      .split(",")
+      .map((r) => r.trim())
+      .filter(Boolean) as AppConfig["health"]["roles"],
+    checkIntervalMs: parseInt(process.env.HEALTH_CHECK_INTERVAL_MS ?? "5000", 10),
+    readyFailureThreshold: parseInt(process.env.HEALTH_READY_FAILURE_THRESHOLD ?? "3", 10),
+    readySuccessThreshold: parseInt(process.env.HEALTH_READY_SUCCESS_THRESHOLD ?? "2", 10),
+    eventLoopMaxLagMs: parseInt(process.env.HEALTH_EVENT_LOOP_MAX_LAG_MS ?? "1000", 10),
+    rpcHealthUrls: (process.env.SOROBAN_RPC_HEALTH_URLS || process.env.SOROBAN_RPC_URL || "https://soroban-testnet.stellar.org")
+      .split(",")
+      .map((u) => u.trim())
+      .filter(Boolean),
+  },
 });
 
 /** Parse `SHADOW_SAMPLE_RATE` into a probability, defaulting to full sampling. */
