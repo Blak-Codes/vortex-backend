@@ -54,6 +54,10 @@ Commit message format is enforced via [commitlint](https://commitlint.js.org/) s
 - Typed Swagger response documentation for every `SorobanController` and
   `TokensController` route, including the account route's 400/429 responses
   (Closes #271)
+- `src/analytics/` — analytics layer over TimescaleDB continuous aggregates
+  (ADR-0001) with `GET /api/v1/analytics/{volume,fees,latency,solver-share}`
+  endpoints (`interval`, `from`, `to`, `chain`, `token` params), idempotent
+  event-driven ingestion, 1m/1h/1d rollups with retention, and historical backfill
 - CI job `migration-lint` — lints the `prisma/migrations/**/migration.sql` a
   change adds or modifies (via the `scripts/check-migrations.ts` squawk-equivalent
   checker) for unsafe DDL: non-concurrent index builds/drops, column type
