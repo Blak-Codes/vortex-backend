@@ -595,6 +595,51 @@ jobs:
             echo "::endgroup::"
           done
 
+  # ── Migration lint ─────────────────────────────────────────────────────────
+  # Blocks unsafe DDL in migrations this change adds or modifies: non-concurrent
+  # index builds/drops, column type rewrites, NOT NULL without a default,
+  # lock-heavy constraints, LOCK TABLE. Also requires a down.sql in every such
+  # migration. Untouched migrations aren't linted, so older ones can't fail
+  # retroactively. The rules and the `-- squawk-ignore` override are in
+  # prisma/migrations/README.md.
+  migration-lint:
+    name: Migration lint (squawk)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so the diff base below is always present.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # --ignore-scripts skips Prisma's engine download and the husky hook;
+      # neither is needed here, and it keeps the job well under 2 minutes.
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Test the migration checker (fixtures)
+        run: npm run test:scripts
+
+      - name: Lint changed migrations
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          # Pull requests: GitHub checks out a merge commit whose first parent is
+          # the base branch tip, so HEAD^1 is exactly "everything this PR adds".
+          # Pushes: diff against the commit that was on the branch before the push.
+          if [ "$EVENT_NAME" = "pull_request" ] || [ -z "$BEFORE_SHA" ] || [ -z "${BEFORE_SHA//0/}" ]; then
+            base="HEAD^1"
+          else
+            base="$BEFORE_SHA"
+          fi
+          npm run check:migrations -- --base "$base"
+
   # ── Docker build verification (#131) ──────────────────────────────────────
   # Ensures every push that changes application code doesn't silently break
   # the Dockerfile. Image publishing to a registry can be wired up separately
