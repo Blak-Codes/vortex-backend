@@ -151,6 +151,7 @@ export const envValidationSchema = Joi.object({
   // Must be explicitly set to "true" — any other value is treated as false.
   // A startup warning is emitted when this is enabled in production.
   ALLOW_LOCAL_SIGNER_IN_PROD: Joi.boolean().default(false),
+  
   // ── Resource-exhaustion limits (issue #476) ───────────────────────────────
   // These values are consumed by src/config/limits.config.ts at startup and
   // override the compile-time defaults when set.  All have safe defaults so
@@ -273,6 +274,7 @@ export const envValidationSchema = Joi.object({
   // Optional: when empty the monitor reports `contract_unconfigured` rather
   // than silently recording zero divergence.
   SHADOW_SOURCE_ACCOUNT: Joi.string().allow("").default(""),
+  
   // ── Governance parameters contract ────────────────────────────────────────
   // When set, ProtocolParamsService reads current + scheduled protocol
   // parameters (fee bps, fill windows, deadlines, exposure ratio, slash
@@ -283,6 +285,7 @@ export const envValidationSchema = Joi.object({
   // How often (ms) to poll the parameters contract.  30 s is the default;
   // lower values increase RPC load; raise in production if rate-limited.
   PARAMS_POLL_INTERVAL_MS: Joi.number().integer().min(5_000).default(30_000),
+  
   // ── Leader election (issue #493) ──────────────────────────────────────────
   // Controls whether Postgres advisory-lock based leader election is enabled
   // for singleton workers (sweeper, event-ingestion).
@@ -335,4 +338,14 @@ export const envValidationSchema = Joi.object({
   // Comma-separated canary user/solver addresses, excluded from public stats
   // and leaderboards.
   CANARY_ADDRESSES: Joi.string().allow("").default(""),
+
+  // ── Egress / SSRF Protection (issue #468) ─────────────────────────────────
+  // Controls the centralized HttpEgressService used for all outbound HTTP requests
+  // (RPC, Horizon, oracles, webhooks) to prevent SSRF attacks.
+  EGRESS_TIMEOUT_MS: Joi.number().integer().min(1000).max(60000).default(10000),
+  EGRESS_MAX_REDIRECTS: Joi.number().integer().min(0).max(5).default(3),
+  EGRESS_MAX_BODY_SIZE_BYTES: Joi.number().integer().min(1024).default(10485760), // 10MB
+  SOROBAN_RPC_ALLOWLIST: Joi.string().allow("").default(""),
+  WEBHOOK_ALLOWLIST: Joi.string().allow("").default(""),
+  ORACLE_ALLOWLIST: Joi.string().allow("").default(""),
 });
