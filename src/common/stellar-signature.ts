@@ -82,14 +82,6 @@ export function buildSolverStatusMessage(action: "deactivate" | "reactivate" | "
 }
 
 /**
- * Build the canonical message that a solver must sign to update its own
- * mutable profile fields (issue #273 — `PATCH /api/v1/solvers/:address`).
- */
-export function buildUpdateSolverMessage(address: string): string {
-  return `update-solver:${address}`;
-}
-
-/**
  * Build the canonical message that a solver must sign to submit a slash dispute.
  */
 export function buildDisputeMessage(slashId: string, address: string, reason: string): string {
