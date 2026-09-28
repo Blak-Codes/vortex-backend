@@ -1,4 +1,4 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable, Logger, Optional } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import {
   Address,
@@ -12,6 +12,7 @@ import {
 } from "@stellar/stellar-sdk";
 import { AppConfig } from "../config/configuration";
 import { SignerService } from "./signer.service";
+import { FeatureFlagService } from "../flags/feature-flag.service";
 
 const NETWORK_PASSPHRASE: Record<AppConfig["stellar"]["network"], string> = {
   testnet: Networks.TESTNET,
@@ -68,6 +69,7 @@ export class SolverRegistryService {
   constructor(
     configService: ConfigService<AppConfig, true>,
     private readonly signerService?: SignerService,
+    @Optional() private readonly flags?: FeatureFlagService,
   ) {
     this.contractId = configService.get("stellar.solverRegistryContractId", { infer: true });
     this.signingKey = configService.get("stellar.signingKey", { infer: true });
@@ -87,7 +89,12 @@ export class SolverRegistryService {
     // When dry-run is on, log what *would* be submitted and return immediately
     // without touching the network. This is the reference implementation for
     // "dry-run output" that all other write paths should mirror.
-    if (this.dryRun) {
+    // ONCHAIN_DRY_RUN is the default; the `onchain-dry-run` runtime flag
+    // (issue #495) can override it per solver without a restart.
+    const dryRun = this.flags
+      ? await this.flags.getBooleanValue("onchain-dry-run", { solver: params.solverAddress, chain: "stellar" })
+      : this.dryRun;
+    if (dryRun) {
       this.logger.log(
         `[dry-run] would slash solver=${params.solverAddress} intent=${params.intentId} ` +
         `reason="${params.reason}" — ONCHAIN_DRY_RUN=true, no transaction submitted`,

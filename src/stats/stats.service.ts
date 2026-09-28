@@ -1,4 +1,7 @@
-import { Injectable } from "@nestjs/common";
+import { Injectable, Optional } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
+import { AppConfig } from "../config/configuration";
+import { isCanaryIntent } from "../common/canary";
 import { IntentsService } from "../intents/intents.service";
 import { SUPPORTED_CHAINS } from "../intents/intents.types";
 import { SolversService } from "../solvers/solvers.service";
@@ -7,18 +10,28 @@ import { IntentsGateway } from "../intents/intents.gateway";
 @Injectable()
 export class StatsService {
   private cachedProtocolStats:
-    | { expiresAt: number; value: ReturnType<StatsService["buildProtocolStats"]> }
+    | { expiresAt: number; value: Awaited<ReturnType<StatsService["getProtocolStats"]>> }
     | null = null;
 
   constructor(
     private readonly intentsService: IntentsService,
     private readonly solversService: SolversService,
     private readonly intentsGateway: IntentsGateway,
-  ) {}
+    @Optional() config?: ConfigService<AppConfig, true>,
+  ) {
+    this.canary = new Set(config?.get("canaryAddresses", { infer: true }) ?? []);
+  }
+
+  /** Canary addresses (issue #496) — their intents and solvers never count toward public stats. */
+  private readonly canary: ReadonlySet<string>;
+
+  private async publicIntents() {
+    return (await this.intentsService.getAll()).filter((i) => !isCanaryIntent(i, this.canary));
+  }
 
   async getProtocolStats() {
-    const intents = await this.intentsService.getAll();
-    const solvers = await this.solversService.getAll();
+    const intents = await this.publicIntents();
+    const solvers = (await this.solversService.getAll()).filter((s) => !this.canary.has(s.address));
 
     const open = intents.filter((i) => i.state === "open").length;
     const filled = intents.filter((i) => i.state === "filled");
@@ -43,7 +56,7 @@ export class StatsService {
   }
 
   async getTreasuryStats() {
-    const intents = await this.intentsService.getAll();
+    const intents = await this.publicIntents();
     const now = Math.floor(Date.now() / 1000);
     const last24hCutoff = now - 86_400;
 

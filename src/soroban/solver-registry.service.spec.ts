@@ -30,6 +30,12 @@ function makeConfigService(
     wsMaxConnections: 1000,
     wsBackplane: "memory",
     redisUrl: "redis://localhost:6379",
+    processRole: "all",
+    jobs: { driver: "memory", shutdownTimeoutMs: 25000 },
+    flags: { pubsub: "memory", refreshMs: 30000, overrides: "" },
+    adminApiKeys: "",
+    guardianContractId: "",
+    canaryAddresses: [],
   };
   return {
     get: (key: string) => {

@@ -1,4 +1,4 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable, Logger, Optional } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import {
   BASE_FEE,
@@ -12,6 +12,7 @@ import {
 import { AppConfig, FeePercentile } from "../config/configuration";
 import { SorobanService } from "./soroban.service";
 import { SignerService } from "./signer.service";
+import { FeatureFlagService } from "../flags/feature-flag.service";
 
 export interface FeeEstimate {
   /** Classic inclusion fee, in stroops. */
@@ -47,6 +48,7 @@ export class StellarTxService {
   constructor(
     private readonly sorobanService: SorobanService,
     configService: ConfigService<AppConfig, true>,
+    @Optional() private readonly flags?: FeatureFlagService,
   ) {
     this.feePercentile = configService.get("stellar.feePercentile", { infer: true });
     this.dryRun = configService.get("onchainDryRun", { infer: true });
@@ -130,7 +132,12 @@ export class StellarTxService {
    * contract interface is finalised (see docs/architecture/onchain-settlement.md).
    */
   async invokeContract(params: InvokeContractParams): Promise<InvokeContractResult> {
-    if (this.dryRun) {
+    // ONCHAIN_DRY_RUN is the default; the `onchain-dry-run` runtime flag
+    // (issue #495) can override it without a restart.
+    const dryRun = this.flags
+      ? await this.flags.getBooleanValue("onchain-dry-run", { chain: "stellar" })
+      : this.dryRun;
+    if (dryRun) {
       this.logger.log(
         `[dry-run] invokeContract contractId=${params.contractId} method=${params.method} ` +
         `— simulating only, ONCHAIN_DRY_RUN=true (no transaction submitted)`,

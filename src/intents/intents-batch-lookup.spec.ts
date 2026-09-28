@@ -22,8 +22,6 @@ describe("IntentsService.getMany (#275)", () => {
     service = new IntentsService(new InMemoryIntentsRepository(), config, stellarTx, prisma);
   });
 
-  afterEach(() => service.onModuleDestroy());
-
   function makeIntent() {
     return service.create({
       user: "GTESTBATCHUSER000000",

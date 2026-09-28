@@ -40,6 +40,7 @@ import { QuoteResponseDto } from "./dto/quote-response.dto";
 import { ListIntentsDto } from "./dto/list-intents.dto";
 import { BatchLookupDto } from "./dto/batch-lookup.dto";
 import { UserThrottlerGuard } from "./user-throttler.guard";
+import { KillSwitchGuard } from "../killswitch/killswitch.guard";
 import {
   verifyStellarSignature,
   buildAcceptMessage,
@@ -54,6 +55,9 @@ import {
   varianceScaleFromPerfScore,
 } from "../common/amount";
 import { SupportedChain } from "./intents.types";
+import { ConfigService } from "@nestjs/config";
+import { AppConfig } from "../config/configuration";
+import { isCanaryIntent } from "../common/canary";
 
 @ApiTags("intents")
 @Controller("api/v1/intents")
@@ -64,7 +68,13 @@ export class IntentsController {
     private readonly intentsGateway: IntentsGateway,
     private readonly tokensService: TokensService,
     private readonly routingService: RoutingService,
-  ) {}
+    config: ConfigService<AppConfig, true>,
+  ) {
+    this.canary = new Set(config.get("canaryAddresses", { infer: true }) ?? []);
+  }
+
+  /** Canary addresses (issue #496). */
+  private readonly canary: ReadonlySet<string>;
 
   @Get()
   @ApiBadRequestResponse({ description: "Invalid limit or offset" })
@@ -198,7 +208,7 @@ export class IntentsController {
    * Issue #45 — additionally throttle per dto.user: 10 creates / 60 s.
    */
   @Post()
-  @UseGuards(UserThrottlerGuard)
+  @UseGuards(KillSwitchGuard, UserThrottlerGuard)
   @ApiTooManyRequestsResponse({
     description:
       "Rate limit exceeded — max 10 intent creations per user per 60 s (or 100 req/min per IP globally)",
@@ -286,6 +296,7 @@ export class IntentsController {
   }
 
   @Post(":id/accept")
+  @UseGuards(KillSwitchGuard)
   @ApiNotFoundResponse({ description: "Intent not found" })
   @ApiConflictResponse({ description: "Intent is not in open state" })
   @ApiGoneResponse({ description: "Intent has expired" })
@@ -315,6 +326,14 @@ export class IntentsController {
     if (!solver.bondAmount || BigInt(solver.bondAmount) <= 0n) {
       throw new ForbiddenException("Solver has insufficient bond");
     }
+    if (this.solversService.isSuspended(dto.solver)) {
+      throw new ForbiddenException("Solver is suspended by an active guardian action");
+    }
+    // Canary intents pair only with canary solvers (issue #496) so synthetic
+    // traffic never affects real solvers' stats or real users' fills.
+    if (isCanaryIntent(intent, this.canary) !== this.canary.has(dto.solver)) {
+      throw new ForbiddenException("Canary intents may only be accepted by canary solvers, and vice versa");
+    }
 
     const updated = await this.intentsService.acceptIfOpen(id, dto.solver, now);
     if (!updated) {
@@ -338,6 +357,7 @@ export class IntentsController {
   }
 
   @Post(":id/fill")
+  @UseGuards(KillSwitchGuard)
   @ApiNotFoundResponse({ description: "Intent not found" })
   @ApiConflictResponse({ description: "Intent is not in accepted state" })
   @ApiForbiddenResponse({ description: "Wrong solver for this intent" })

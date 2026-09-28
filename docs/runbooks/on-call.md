@@ -14,8 +14,10 @@
 3. [SLOs and burn-rate alerts](#slos-and-burn-rate-alerts)
 4. [Scenario A — Soroban RPC downtime](#scenario-a--soroban-rpc-downtime)
 5. [Scenario B — Stuck or slow sweeper](#scenario-b--stuck-or-slow-sweeper)
-6. [Key configuration](#key-configuration)
-7. [Escalation path](#escalation-path)
+6. [Scenario C — Guardian emergency action](#scenario-c--guardian-emergency-action)
+7. [Scenario D — Synthetic canary failing](#scenario-d--synthetic-canary-failing)
+8. [Key configuration](#key-configuration)
+9. [Escalation path](#escalation-path)
 
 ---
 
@@ -265,6 +267,80 @@ curl -s http://localhost:4000/api/v1/intents?state=open | jq '[.intents[] | sele
 
 ---
 
+## Scenario C — Guardian emergency action
+
+The backend ingests emergency actions from the on-chain guardian / security
+council contract (`GUARDIAN_CONTRACT_ID`, issue #507) and applies them within
+one poll (10 s) on every instance:
+
+| Guardian event | Backend effect |
+|---|---|
+| `guardian_pause` / `guardian_unpause` | Kill switch: `POST /api/v1/intents`, `/:id/accept`, `/:id/fill` return **503**. Cancels still work. |
+| `guardian_freeze` / `guardian_unfreeze` (target = flag key or `*`) | Runtime feature flag changes for that key return **409**. |
+| `guardian_blacklist` / `guardian_unblacklist` (target = solver) | Solver cannot accept intents (**403**); operator reactivation returns **409**. |
+
+### Check status
+
+```bash
+curl -s http://localhost:4000/api/v1/governance/guardian/status | jq
+# { paused, pauseSources: ["guardian","operator"], guardianActions: [{ id, kind, target, txHash, ledger, activatedAt }], ... }
+```
+
+Every active action carries its `txHash` — confirm it on a block explorer
+before acting.
+
+### Rules while a guardian action is active
+
+- Guardian state is **authoritative**. Operators cannot clear it: operator
+  resume, solver reactivation and flag edits on a frozen key are refused.
+- Pause is the OR of sources. A guardian unpause while an operator pause is
+  active leaves the protocol paused (and vice versa) — **both must clear**.
+
+```bash
+# Operator pause / resume (admin role; resume leaves any guardian pause in place)
+curl -X POST -H "x-admin-key: $ADMIN_KEY" -H 'content-type: application/json' \
+  -d '{"reason":"incident INC-123"}' http://localhost:4000/admin/killswitch/pause
+curl -X POST -H "x-admin-key: $ADMIN_KEY" -H 'content-type: application/json' \
+  -d '{"reason":"resolved"}' http://localhost:4000/admin/killswitch/resume
+```
+
+### Manual override (break-glass)
+
+Only for a confirmed false positive, with sign-off from the security council.
+Requires a **superadmin** key and is refused unless the audit record is
+written (`admin_audit_log`, action `guardian.override`):
+
+```bash
+curl -X POST -H "x-admin-key: $SUPERADMIN_KEY" -H 'content-type: application/json' \
+  -d '{"reason":"false positive, council ack in #sec-incident"}' \
+  http://localhost:4000/api/v1/governance/guardian/actions/<actionId>/override
+```
+
+The override lasts until the guardian emits a new action for the same target.
+
+---
+
+## Scenario D — Synthetic canary failing
+
+Alerts `VortexCanaryConsecutiveFailures`, `VortexCanaryFundsLow`,
+`VortexCanaryBudgetExceeded` come from the canary CronJob
+(`tools/canary/`, issue #496).
+
+1. Check `vortex_canary_step_duration_seconds{step=...}` for the last step
+   that reported — the failing step is the one after it — and the CronJob pod
+   logs (`[canary] FAILED ...` names the HTTP call and status).
+2. `create`/`accept`/`fill` returning 503 → check Scenario C (paused).
+3. `fill` failing on-chain → canary funds or trustline issue; check
+   `vortex_canary_balance_xlm`.
+4. Funds low / budget exceeded → suspend the CronJob
+   (`kubectl patch cronjob <name> -p '{"spec":{"suspend":true}}'`), top up the
+   canary solver account, investigate fee spikes before resuming.
+
+Canary intents are excluded from public stats and leaderboards via
+`CANARY_ADDRESSES`; if they show up there, that variable is missing on the API.
+
+---
+
 ## Key configuration
 
 | Variable | Default | Effect |
@@ -274,6 +350,10 @@ curl -s http://localhost:4000/api/v1/intents?state=open | jq '[.intents[] | sele
 | `PORT` | `4000` | HTTP + WS listen port |
 | `NODE_ENV` | `development` | Log verbosity (set to `production` in prod) |
 | `SWEEP_INTERVAL_MS` | `30000` (hardcoded) | How often the sweeper runs; change requires code deploy |
+| `GUARDIAN_CONTRACT_ID` | empty (disabled) | Guardian contract polled for emergency actions |
+| `ADMIN_API_KEYS` | empty (admin APIs disabled) | `id:role:secret` entries for admin / superadmin endpoints |
+| `PROCESS_ROLE` / `JOBS_DRIVER` | `all` / `memory` | Where job workers run; `bullmq` for multi-instance |
+| `CANARY_ADDRESSES` | empty | Canary accounts excluded from public stats |
 
 ---
 

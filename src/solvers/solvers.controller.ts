@@ -11,6 +11,9 @@ import {
   Query,
 } from "@nestjs/common";
 import { ApiOperation, ApiQuery, ApiTags } from "@nestjs/swagger";
+import { ConfigService } from "@nestjs/config";
+import { AppConfig } from "../config/configuration";
+import { isCanaryIntent } from "../common/canary";
 import { IntentsService } from "../intents/intents.service";
 import { buildDisputeMessage, verifyStellarSignature, buildSolverStatusMessage } from "../common/stellar-signature";
 import { SolversService, LeaderboardWindow } from "./solvers.service";
@@ -29,7 +32,13 @@ export class SolversController {
   constructor(
     private readonly solversService: SolversService,
     private readonly intentsService: IntentsService,
-  ) {}
+    config: ConfigService<AppConfig, true>,
+  ) {
+    this.canary = new Set(config.get("canaryAddresses", { infer: true }) ?? []);
+  }
+
+  /** Canary addresses (issue #496) — excluded from every leaderboard. */
+  private readonly canary: ReadonlySet<string>;
 
   @Post()
   async register(@Body() dto: RegisterSolverDto) {
@@ -55,8 +64,8 @@ export class SolversController {
   @ApiQuery({ name: "window", required: false, enum: ["24h", "7d", "30d", "all"], description: "Time window over which to compute rankings." })
   async getLeaderboard(@Query("window") window: string = "all") {
     const resolvedWindow = this.normalizeWindow(window);
-    const solvers = await this.solversService.getAll();
-    const intents = await this.intentsService.getAll();
+    const solvers = (await this.solversService.getAll()).filter((s) => !this.canary.has(s.address));
+    const intents = (await this.intentsService.getAll()).filter((i) => !isCanaryIntent(i, this.canary));
     const now = Math.floor(Date.now() / 1000);
     const cutoff = resolvedWindow === "all" ? 0 : now - WINDOW_SECONDS[resolvedWindow];
 
@@ -114,9 +123,9 @@ export class SolversController {
 
   @Get()
   async getLegacyLeaderboard() {
-    const solvers = (await this.solversService.getAll()).sort(
-      (a, b) => b.fillsCompleted - a.fillsCompleted,
-    );
+    const solvers = (await this.solversService.getAll())
+      .filter((s) => !this.canary.has(s.address))
+      .sort((a, b) => b.fillsCompleted - a.fillsCompleted);
     return { solvers, count: solvers.length };
   }
 

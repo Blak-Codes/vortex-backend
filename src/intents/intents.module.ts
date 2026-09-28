@@ -4,6 +4,7 @@ import { IntentsService } from "./intents.service";
 import { IntentsController } from "./intents.controller";
 import { IntentsGateway } from "./intents.gateway";
 import { IntentsSweeperService } from "./intents-sweeper.service";
+import { IntentsMaintenanceJobs } from "./intents-maintenance.jobs";
 import { INTENTS_REPOSITORY, InMemoryIntentsRepository } from "./intents.repository";
 import { PrismaIntentsRepository } from "./prisma-intents.repository";
 import { SolversModule } from "../solvers/solvers.module";
@@ -35,6 +36,7 @@ import { PrismaService } from "../prisma/prisma.service";
     IntentsService,
     IntentsGateway,
     IntentsSweeperService,
+    IntentsMaintenanceJobs,
     EventIngestionService,
   ],
   exports: [IntentsService, IntentsGateway],

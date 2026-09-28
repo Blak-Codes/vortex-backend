@@ -10,6 +10,12 @@ import { StatsModule } from "./stats/stats.module";
 import { SorobanModule } from "./soroban/soroban.module";
 import { RoutingModule } from "./routing/routing.module";
 import { PrismaModule } from "./prisma/prisma.module";
+import { MetricsModule } from "./metrics/metrics.module";
+import { AdminModule } from "./admin/admin.module";
+import { JobsModule } from "./jobs/jobs.module";
+import { KillSwitchModule } from "./killswitch/killswitch.module";
+import { FlagsModule } from "./flags/flags.module";
+import { GovernanceModule } from "./governance/governance.module";
 
 @Module({
   imports: [
@@ -23,6 +29,11 @@ import { PrismaModule } from "./prisma/prisma.module";
     ]),
     ConfigModule,
     PrismaModule,
+    MetricsModule,
+    AdminModule,
+    JobsModule,
+    KillSwitchModule,
+    FlagsModule,
     HealthModule,
     TokensModule,
     IntentsModule,
@@ -30,6 +41,7 @@ import { PrismaModule } from "./prisma/prisma.module";
     StatsModule,
     SorobanModule,
     RoutingModule,
+    GovernanceModule,
   ],
   controllers: [],
   providers: [

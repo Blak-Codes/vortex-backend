@@ -1,7 +1,8 @@
-import { Inject, Injectable, Logger } from "@nestjs/common";
+import { ConflictException, Inject, Injectable, Logger, Optional } from "@nestjs/common";
 import { SupportedChain } from "../intents/intents.types";
 import { SOLVERS_REPOSITORY, ISolversRepository } from "./solvers.repository";
 import { SolverRecord, SolverPendingPenalty } from "./solvers.types";
+import { KillSwitchService } from "../killswitch/killswitch.service";
 
 export type LeaderboardWindow = "24h" | "7d" | "30d" | "all";
 
@@ -39,7 +40,16 @@ export class SolversService {
   constructor(
     @Inject(SOLVERS_REPOSITORY)
     private readonly repo: ISolversRepository,
+    @Optional() private readonly killSwitch?: KillSwitchService,
   ) {}
+
+  /**
+   * True while an active guardian blacklist covers `address` (issue #507).
+   * Derived from guardian state; operators cannot clear it by reactivating.
+   */
+  isSuspended(address: string): boolean {
+    return this.killSwitch?.isSolverSuspended(address) ?? false;
+  }
 
   async getAll(): Promise<SolverRecord[]> {
     return this.repo.findAll();
@@ -96,6 +106,9 @@ export class SolversService {
   }
 
   async reactivate(address: string): Promise<SolverRecord | null> {
+    if (this.isSuspended(address)) {
+      throw new ConflictException("Solver is suspended by an active guardian action");
+    }
     const solver = await this.repo.findByAddress(address);
     if (!solver) return null;
     const updated = { ...solver, isActive: true };

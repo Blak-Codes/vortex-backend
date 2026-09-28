@@ -1,4 +1,4 @@
-import { Module } from "@nestjs/common";
+import { Module, forwardRef } from "@nestjs/common";
 import { EventIngestionService } from "./event-ingestion.service";
 import { SorobanController } from "./soroban.controller";
 import { SorobanService } from "./soroban.service";
@@ -8,7 +8,7 @@ import { StellarTxService } from "./stellar-tx.service";
 import { SolversModule } from "../solvers/solvers.module";
 
 @Module({
-  imports: [forwardRef(() => IntentsModule)],
+  imports: [forwardRef(() => SolversModule)],
   controllers: [SorobanController],
   providers: [
     SorobanService,
