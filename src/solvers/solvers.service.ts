@@ -6,6 +6,18 @@ import { GuardianStateService } from "../governance/guardian-state.service";
 
 export type LeaderboardWindow = "24h" | "7d" | "30d" | "all";
 
+export function solverSupports(
+  solver: Pick<SolverRecord, "supportedChains" | "supportedTokens">,
+  chain: SupportedChain | string,
+  token: string,
+): boolean {
+  if (!solver.supportedChains.includes(chain as SupportedChain) && chain !== "*") {
+    return false;
+  }
+  const normalizedToken = token.toUpperCase();
+  return solver.supportedTokens.some((supportedToken) => supportedToken.toUpperCase() === normalizedToken);
+}
+
 export interface SlashDisputeRecord {
   submittedAt: number;
   reason: string;
@@ -157,6 +169,13 @@ export class SolversService {
   }
 
   /**
+   * Bumps lastActiveAt on a successful fill. Called by IntentsController.fill()
+   * after fillIfAccepted() succeeds.
+   */
+  async recordSuccessfulFill(address: string): Promise<SolverRecord | null> {
+    const solver = await this.repo.findByAddress(address);
+    if (!solver) return null;
+    const updated = { ...solver, lastActiveAt: Math.floor(Date.now() / 1000) };
    * Register a solver from an on-chain SolverRegistered event (issue #399).
    *
    * Creates a new solver record with source="chain" and the bond amount
@@ -214,6 +233,24 @@ export class SolversService {
   }
 
   /**
+   * Apply a partial update to a solver's mutable profile fields
+   * (`name`, `supportedChains`, `supportedTokens`, `avgFillTime`) — issue #273.
+   *
+   * `undefined` values in `patch` are ignored so an absent field never clears
+   * existing data. Returns `undefined` when no solver exists for `address`.
+   */
+  async update(
+    address: string,
+    patch: Partial<Pick<SolverRecord, "name" | "supportedChains" | "supportedTokens" | "avgFillTime">>,
+  ): Promise<SolverRecord | undefined> {
+    const solver = await this.repo.findByAddress(address);
+    if (!solver) return undefined;
+
+    const applied = Object.fromEntries(
+      Object.entries(patch).filter(([, value]) => value !== undefined),
+    ) as Partial<SolverRecord>;
+
+    const updated: SolverRecord = { ...solver, ...applied };
    * Records that a solver successfully filled an intent.
    * Increments fillsCompleted and updates lastActiveAt.
    */

@@ -1,3 +1,4 @@
+import { forwardRef, Module } from "@nestjs/common";
 import { Module, forwardRef } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { EventIngestionService } from "./event-ingestion.service";
@@ -21,6 +22,12 @@ import { IntentsModule } from "../intents/intents.module";
 // MetricsModule is @Global() and registered in AppModule, so the MetricsService
 // that ShadowService emits its counters through needs no import here.
 @Module({
+  // SorobanModule <-> SolversModule <-> IntentsModule (which imports this
+  // module) form a CommonJS cycle. SolversModule must be resolved lazily so
+  // that evaluating this file never triggers IntentsModule's module decorator
+  // while SorobanModule is still partially initialised.
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  imports: [forwardRef(() => require("../solvers/solvers.module").SolversModule)],
   imports: [forwardRef(() => SolversModule)],
   // IntentsModule → SorobanModule (IntentsService submits settlement writes)
   // and SorobanModule → IntentsModule (EventIngestionService reconciles

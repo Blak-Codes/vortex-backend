@@ -372,10 +372,10 @@ describe("IntentsService", () => {
       const stellarTxService = fakeStellarTxService();
       const svc = makeService({ onchainIntentsEnabled: false }, stellarTxService);
 
-      const intent = await svc.create(validCreateData());
+      const intent = await service.create(validCreateData());
 
       expect(stellarTxService.invokeContract).not.toHaveBeenCalled();
-      expect(await svc.get(intent.intentId)).toEqual(intent);
+      expect(await service.get(intent.intentId)).toEqual(intent);
     });
 
     it("invokes the settlement contract and preserves the Intent shape when the flag is on", async () => {
@@ -387,7 +387,7 @@ describe("IntentsService", () => {
       );
 
       const data = validCreateData();
-      const intent = await svc.create(data);
+      const intent = await service.create(data);
 
       expect(stellarTxService.invokeContract).toHaveBeenCalledTimes(1);
       const call = stellarTxService.invokeContract.mock.calls[0][0];
@@ -409,19 +409,21 @@ describe("IntentsService", () => {
           deadline: 0,
         }).sort(),
       );
-      expect(await svc.get(intent.intentId)).toBeDefined();
+      expect(await service.get(intent.intentId)).toBeDefined();
     });
 
     it("rejects with a clear error and does not create the intent when SETTLEMENT_CONTRACT_ID is unset", async () => {
       const stellarTxService = fakeStellarTxService();
+      const service = makeService({ onchainIntentsEnabled: true }, stellarTxService);
+      const before = (await service.getAll()).length;
       const svc = makeService({ onchainIntentsEnabled: true }, stellarTxService);
       const before = (await svc.getAll()).length;
 
-      await expect(svc.create(validCreateData())).rejects.toMatchObject({
+      await expect(service.create(validCreateData())).rejects.toMatchObject({
         message: expect.stringContaining("SETTLEMENT_CONTRACT_ID"),
       });
       expect(stellarTxService.invokeContract).not.toHaveBeenCalled();
-      expect(await svc.getAll()).toHaveLength(before);
+      expect(await service.getAll()).toHaveLength(before);
     });
 
     it("rejects and does not create the intent when the on-chain call fails", async () => {
@@ -431,10 +433,10 @@ describe("IntentsService", () => {
         { onchainIntentsEnabled: true, settlementContractId: VALID_CONTRACT_ID },
         stellarTxService,
       );
-      const before = (await svc.getAll()).length;
+      const before = (await service.getAll()).length;
 
-      await expect(svc.create(validCreateData())).rejects.toThrow(/settlement contract/i);
-      expect(await svc.getAll()).toHaveLength(before);
+      await expect(service.create(validCreateData())).rejects.toThrow(/settlement contract/i);
+      expect(await service.getAll()).toHaveLength(before);
     });
   });
 

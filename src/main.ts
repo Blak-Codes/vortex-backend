@@ -1,6 +1,7 @@
 import "./tracing";
 import "reflect-metadata";
 import { NestFactory } from "@nestjs/core";
+import { NestExpressApplication } from "@nestjs/platform-express";
 import { ConfigService } from "@nestjs/config";
 import { ValidationPipe, Logger } from "@nestjs/common";
 import { WsAdapter } from "@nestjs/platform-ws";
@@ -64,7 +65,7 @@ function checkContractIdEnvVars(
 }
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule);
 
   // Issue #20 — trust the first proxy hop so Helmet/HSTS sees the real
   // forwarded protocol when TLS terminates upstream behind nginx/ALB.

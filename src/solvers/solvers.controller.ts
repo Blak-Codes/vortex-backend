@@ -9,6 +9,19 @@ import {
   Post,
   Query,
 } from "@nestjs/common";
+import {
+  ApiBadRequestResponse,
+  ApiNotFoundResponse,
+  ApiOkResponse,
+  ApiOperation,
+  ApiQuery,
+  ApiTags,
+  ApiUnauthorizedResponse,
+} from "@nestjs/swagger";
+import { IntentsService } from "../intents/intents.service";
+import { buildDisputeMessage, buildRegisterMessage, buildUpdateSolverMessage, verifyStellarSignature, buildSolverStatusMessage } from "../common/stellar-signature";
+import { SolversService, LeaderboardWindow, solverSupports } from "./solvers.service";
+import { ListIntentsDto } from "../intents/dto/list-intents.dto";
 import { ApiNotFoundResponse, ApiOperation, ApiQuery, ApiTags } from "@nestjs/swagger";
 import { ConfigService } from "@nestjs/config";
 import { AppConfig } from "../config/configuration";
@@ -243,6 +256,29 @@ export class SolversController {
 
   async getSolver(@Param("address") address: string) {
     const solver = await this.solversService.get(address);
+    if (!solver) throw new NotFoundException("Solver not found");
+    return solver;
+  }
+
+  /**
+   * PATCH /api/v1/solvers/:address
+   *
+   * Issue #273 — lets a solver operator edit their mutable profile fields
+   * (`name`, `supportedChains`, `supportedTokens`, `avgFillTime`). Signature
+   * verified per the repo's `verifyStellarSignature` convention: the operator
+   * proves control of `:address` before any write. Immutable fields are
+   * stripped by the DTO whitelist.
+   */
+  @Patch(":address")
+  @ApiOkResponse({ description: "Updated solver record" })
+  @ApiBadRequestResponse({ description: "Invalid update body" })
+  @ApiUnauthorizedResponse({ description: "Missing or invalid signature" })
+  @ApiNotFoundResponse({ description: "Solver not found" })
+  async updateSolver(@Param("address") address: string, @Body() dto: UpdateSolverDto) {
+    verifyStellarSignature(address, buildUpdateSolverMessage(address), dto.signature);
+
+    const { signature: _signature, ...patch } = dto;
+    const solver = await this.solversService.update(address, patch);
     if (!solver) throw new NotFoundException("Solver not found");
     return solver;
   }

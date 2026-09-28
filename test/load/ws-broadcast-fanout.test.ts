@@ -51,38 +51,58 @@ function getWsPort(app: INestApplication): number {
  * has received its initial `snapshot` message (meaning the handshake is
  * complete and the server has added it to the subscriber set), then resolve
  * with the array of open sockets.
+ *
+ * Clients are opened in batches: firing all `count` connects in a single tick
+ * overflows the listener's accept backlog on Windows, which answers the
+ * overflow with a reset (surfaced here as `ECONNREFUSED`). Waiting for each
+ * batch's snapshot drains the backlog before the next batch is dialled.
  */
-async function openClients(wsUrl: string, count: number): Promise<WebSocket[]> {
+async function openClients(
+  wsUrl: string,
+  count: number,
+  batchSize = 50,
+): Promise<WebSocket[]> {
   const clients: WebSocket[] = [];
-  const ready: Promise<void>[] = [];
 
-  for (let i = 0; i < count; i++) {
-    const ws = new WebSocket(wsUrl);
-    clients.push(ws);
+  for (let start = 0; start < count; start += batchSize) {
+    const size = Math.min(batchSize, count - start);
+    const batch: WebSocket[] = [];
+    const ready: Promise<void>[] = [];
 
-    ready.push(
-      new Promise<void>((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error(`client ${i} handshake timeout`)), 10_000);
+    for (let i = 0; i < size; i++) {
+      const index = start + i;
+      const ws = new WebSocket(wsUrl);
+      batch.push(ws);
 
-        ws.on("error", (err) => {
-          clearTimeout(timeout);
-          reject(err);
-        });
+      ready.push(
+        new Promise<void>((resolve, reject) => {
+          const timeout = setTimeout(
+            () => reject(new Error(`client ${index} handshake timeout`)),
+            10_000,
+          );
 
-        ws.on("message", (raw) => {
-          const msg = JSON.parse(raw.toString()) as { type: string };
-          // The server sends "connected" then "snapshot" on every connection.
-          // We wait for the snapshot so we know the client is fully subscribed.
-          if (msg.type === "snapshot") {
+          ws.on("error", (err) => {
             clearTimeout(timeout);
-            resolve();
-          }
-        });
-      }),
-    );
+            reject(err);
+          });
+
+          ws.on("message", (raw) => {
+            const msg = JSON.parse(raw.toString()) as { type: string };
+            // The server sends "connected" then "snapshot" on every connection.
+            // We wait for the snapshot so we know the client is fully subscribed.
+            if (msg.type === "snapshot") {
+              clearTimeout(timeout);
+              resolve();
+            }
+          });
+        }),
+      );
+    }
+
+    await Promise.all(ready);
+    clients.push(...batch);
   }
 
-  await Promise.all(ready);
   return clients;
 }
 
