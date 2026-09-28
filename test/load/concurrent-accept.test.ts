@@ -2,8 +2,19 @@ import { INestApplication } from "@nestjs/common";
 import request from "supertest";
 import { createTestApp } from "../utils/create-test-app";
 import { InMemoryIntentsRepository } from "../../src/intents/intents.repository";
+import { SEED_SOLVER_KEYPAIRS } from "../../src/solvers/solvers.seed";
+import { buildAcceptMessage, buildFillMessage } from "../../src/common/stellar-signature";
 
-const SOLVERS = ["SOLVER_ALPHA", "SOLVER_BETA", "SOLVER_GAMMA"];
+const SOLVER_KPS = [
+  SEED_SOLVER_KEYPAIRS.ALPHA,
+  SEED_SOLVER_KEYPAIRS.BETA,
+  SEED_SOLVER_KEYPAIRS.GAMMA,
+];
+const SOLVERS = SOLVER_KPS.map((kp) => kp.publicKey());
+
+function sign(kp: (typeof SOLVER_KPS)[number], msg: string): string {
+  return kp.sign(Buffer.from(msg, "utf8")).toString("base64");
+}
 
 const validCreateBody = {
   user: "GRACETESTUSER1234567",
@@ -43,10 +54,11 @@ describe("Concurrent accept / fill race load test", () => {
 
     const results = await Promise.allSettled(
       Array.from({ length: concurrency }, (_, i) => {
-        const solver = SOLVERS[i % SOLVERS.length];
+        const kp = SOLVER_KPS[i % SOLVER_KPS.length];
+        const solver = kp.publicKey();
         return request(app.getHttpServer())
           .post(`/api/v1/intents/${intentId}/accept`)
-          .send({ solver });
+          .send({ solver, signature: sign(kp, buildAcceptMessage(intentId, solver)) });
       }),
     );
 
@@ -67,10 +79,14 @@ describe("Concurrent accept / fill race load test", () => {
 
   it("only one solver wins when N concurrent fill() calls race on the same accepted intent", async () => {
     const intentId = await createIntent();
+    const kp = SOLVER_KPS[0];
 
     await request(app.getHttpServer())
       .post(`/api/v1/intents/${intentId}/accept`)
-      .send({ solver: "SOLVER_ALPHA" })
+      .send({
+        solver: kp.publicKey(),
+        signature: sign(kp, buildAcceptMessage(intentId, kp.publicKey())),
+      })
       .expect(201);
 
     const concurrency = 20;
@@ -79,7 +95,12 @@ describe("Concurrent accept / fill race load test", () => {
       Array.from({ length: concurrency }, () =>
         request(app.getHttpServer())
           .post(`/api/v1/intents/${intentId}/fill`)
-          .send({ solver: "SOLVER_ALPHA", fillAmount: "995000", txHash: `tx-${Math.random()}` }),
+          .send({
+            solver: kp.publicKey(),
+            fillAmount: "995000",
+            txHash: `tx-${Math.random()}`,
+            signature: sign(kp, buildFillMessage(intentId, kp.publicKey())),
+          }),
       ),
     );
 
@@ -106,10 +127,11 @@ describe("Concurrent accept / fill race load test", () => {
 
     const results = await Promise.allSettled(
       intentIds.map((id, i) => {
-        const solver = SOLVERS[i % SOLVERS.length];
+        const kp = SOLVER_KPS[i % SOLVER_KPS.length];
+        const solver = kp.publicKey();
         return request(app.getHttpServer())
           .post(`/api/v1/intents/${id}/accept`)
-          .send({ solver });
+          .send({ solver, signature: sign(kp, buildAcceptMessage(id, solver)) });
       }),
     );
 

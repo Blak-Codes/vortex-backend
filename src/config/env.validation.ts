@@ -227,12 +227,11 @@ export const envValidationSchema = Joi.object({
   //     on-chain write paths.  This matches the fail-closed pattern used
   //     for SOROBAN_SIGNING_KEY.
   //
-  // Limitations: the flag is config-driven and takes effect on the next
-  // process start; there is no HTTP endpoint to flip it at runtime without
-  // a restart.  This limitation is documented in onchain-cutover.md and is
-  // intentional for this iteration — a hot-reload mechanism is a separate
-  // concern.  Set ONCHAIN_DRY_RUN=false only after completing the dry-run
-  // soak described in docs/runbooks/onchain-cutover.md.
+  // This is the env default for the `onchain-dry-run` runtime feature flag
+  // (issue #495); the flag can override it without a restart, and turning
+  // dry-run off in production through the flag requires two approvals.
+  // Set ONCHAIN_DRY_RUN=false only after completing the dry-run soak
+  // described in docs/runbooks/onchain-cutover.md.
   ONCHAIN_DRY_RUN: Joi.boolean()
     .when("NODE_ENV", {
       is: "production",
@@ -303,6 +302,39 @@ export const envValidationSchema = Joi.object({
   // but increase DB load. Default 5 s gives ≤ 15 s failover.
   LEADER_ELECTION_HEARTBEAT_MS: Joi.number().integer().min(1000).max(60000).default(5000),
 
+  // ── Background jobs (issue #494) ──────────────────────────────────────────
+  // PROCESS_ROLE: "api" serves HTTP/WS only, "worker" runs queue workers,
+  // "all" does both (single-process dev default). Producers work in any role.
+  PROCESS_ROLE: Joi.string().valid("api", "worker", "all").default("all"),
+  // JOBS_DRIVER: "memory" is single-process and non-durable (dev/test);
+  // "bullmq" uses REDIS_URL and is required for multi-instance deploys.
+  JOBS_DRIVER: Joi.string().valid("memory", "bullmq").default("memory"),
+  JOBS_SHUTDOWN_TIMEOUT_MS: Joi.number().integer().min(0).default(25000),
+
+  // ── Runtime feature flags (issue #495) ────────────────────────────────────
+  FLAGS_PUBSUB: Joi.string().valid("memory", "redis").default("memory"),
+  FLAGS_REFRESH_MS: Joi.number().integer().min(1000).default(30000),
+  // Comma-separated "key=true|false" pins that win over DB state (break-glass).
+  FLAG_OVERRIDES: Joi.string()
+    .allow("")
+    .pattern(/^([a-z0-9-]+=(true|false))(,[a-z0-9-]+=(true|false))*$/)
+    .default(""),
+
+  // ── Admin RBAC ────────────────────────────────────────────────────────────
+  // Comma-separated "id:role:secret" entries; role is "admin" or "superadmin".
+  // Empty disables every admin endpoint (401).
+  ADMIN_API_KEYS: Joi.string()
+    .allow("")
+    .pattern(/^([A-Za-z0-9_.-]+:(admin|superadmin):[^,:]{16,})(,[A-Za-z0-9_.-]+:(admin|superadmin):[^,:]{16,})*$/)
+    .default(""),
+
+  // ── Guardian emergency ingestion (issue #507) ─────────────────────────────
+  GUARDIAN_CONTRACT_ID: Joi.string().allow("").default(""),
+
+  // ── Synthetic canary (issue #496) ─────────────────────────────────────────
+  // Comma-separated canary user/solver addresses, excluded from public stats
+  // and leaderboards.
+  CANARY_ADDRESSES: Joi.string().allow("").default(""),
   // ── WS gateway hardening (issue #455) ─────────────────────────────────────
   WS_MAX_PAYLOAD_BYTES: Joi.number().integer().min(1024).default(16384),
   WS_MAX_CONNECTIONS_PER_IP: Joi.number().integer().min(0).default(20),

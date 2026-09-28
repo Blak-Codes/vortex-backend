@@ -17,6 +17,12 @@ RUN npm run db:generate
 COPY . .
 RUN npm run build
 
+# ─── Canary stage (issue #496) ───────────────────────────────────────────────
+# Synthetic lifecycle monitor; build with `--target canary`. Reuses the build
+# stage (full deps + source) because the runner executes via tsx.
+FROM build AS canary
+ENTRYPOINT ["npx", "tsx", "tools/canary/canary.ts"]
+
 # ─── Runtime stage ───────────────────────────────────────────────────────────
 FROM node:20-alpine AS runtime
 WORKDIR /app

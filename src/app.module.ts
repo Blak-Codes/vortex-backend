@@ -14,10 +14,16 @@ import { RoutingModule } from "./routing/routing.module";
 import { MetricsModule } from "./metrics/metrics.module";
 import { KillSwitchModule } from "./killswitch/killswitch.module";
 import { PrismaModule } from "./prisma/prisma.module";
+import { MetricsModule } from "./metrics/metrics.module";
 import { TreasuryModule } from "./treasury/treasury.module";
 import { GovernanceModule } from "./governance/governance.module";
 import { MetricsModule } from "./metrics/metrics.module";
 import { LeaderElectionModule } from "./common/leader-election";
+import { AdminModule } from "./admin/admin.module";
+import { JobsModule } from "./jobs/jobs.module";
+import { FlagsModule } from "./flags/flags.module";
+import { GuardianStateModule } from "./governance/guardian-state.service";
+import { DatasetsModule } from "./datasets/datasets.module";
 
 @Module({
   imports: [
@@ -52,6 +58,12 @@ import { LeaderElectionModule } from "./common/leader-election";
     // LeaderElectionService is available when workers call registerWorker()
     // in their onModuleInit hooks.
     LeaderElectionModule.forRoot(),
+    // Issues #494/#495/#507 — admin RBAC + audit, job queue, runtime flags,
+    // guardian-derived policy state.
+    AdminModule,
+    JobsModule,
+    FlagsModule,
+    GuardianStateModule,
     HealthModule,
     TokensModule,
     IntentsModule,
@@ -59,6 +71,7 @@ import { LeaderElectionModule } from "./common/leader-election";
     StatsModule,
     SorobanModule,
     RoutingModule,
+    MetricsModule,
     TreasuryModule,
     GovernanceModule,
   ],

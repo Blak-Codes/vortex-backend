@@ -128,8 +128,8 @@ export interface AppConfig {
    * production; must be explicitly set in production (validated by
    * envValidationSchema — see src/config/env.validation.ts).
    *
-   * Note: this flag takes effect on the next process restart; there is no
-   * hot-reload mechanism for this iteration.  See
+   * This value is the env default. At runtime the `onchain-dry-run` feature
+   * flag (src/flags/, issue #495) can override it without a restart — see
    * docs/runbooks/onchain-cutover.md for the staged rollout procedure.
    */
   onchainDryRun: boolean;
@@ -217,6 +217,31 @@ export interface AppConfig {
     /** Heartbeat interval in ms (default 5000). */
     heartbeatMs: number;
   };
+  /**
+   * Process role (issue #494). Producers may enqueue jobs from any role;
+   * queue workers only run when the role is "worker" or "all".
+   */
+  processRole: "api" | "worker" | "all";
+  jobs: {
+    /** "memory" (single-process, dev/test) or "bullmq" (Redis-backed, durable). */
+    driver: "memory" | "bullmq";
+    /** Grace period for in-flight jobs on shutdown before they are returned to the queue. */
+    shutdownTimeoutMs: number;
+  };
+  flags: {
+    /** Cross-instance change propagation: in-process only, or Redis pub/sub (issue #495). */
+    pubsub: "memory" | "redis";
+    /** Safety-net reload interval for the flag cache, in ms. */
+    refreshMs: number;
+    /** Hard pins that win over DB state, e.g. "onchain-dry-run=true". */
+    overrides: string;
+  };
+  /** Raw ADMIN_API_KEYS value ("id:role:secret,..."); parsed by src/admin/admin-auth.ts. */
+  adminApiKeys: string;
+  /** Soroban contract emitting guardian emergency events (issue #507). Empty disables ingestion. */
+  guardianContractId: string;
+  /** Addresses (users and solvers) owned by the synthetic canary (issue #496). */
+  canaryAddresses: string[];
   /** WS gateway hardening (issue #455). */
   ws: {
     /** Largest inbound frame accepted; larger frames close the socket (1009). */
@@ -325,6 +350,22 @@ export default (): AppConfig => ({
     enabled: (process.env.LEADER_ELECTION_ENABLED ?? "false") === "true",
     heartbeatMs: parseInt(process.env.LEADER_ELECTION_HEARTBEAT_MS ?? "5000", 10),
   },
+  processRole: (process.env.PROCESS_ROLE ?? "all") as AppConfig["processRole"],
+  jobs: {
+    driver: (process.env.JOBS_DRIVER ?? "memory") as AppConfig["jobs"]["driver"],
+    shutdownTimeoutMs: parseInt(process.env.JOBS_SHUTDOWN_TIMEOUT_MS ?? "25000", 10),
+  },
+  flags: {
+    pubsub: (process.env.FLAGS_PUBSUB ?? "memory") as AppConfig["flags"]["pubsub"],
+    refreshMs: parseInt(process.env.FLAGS_REFRESH_MS ?? "30000", 10),
+    overrides: process.env.FLAG_OVERRIDES ?? "",
+  },
+  adminApiKeys: process.env.ADMIN_API_KEYS ?? "",
+  guardianContractId: process.env.GUARDIAN_CONTRACT_ID ?? "",
+  canaryAddresses: (process.env.CANARY_ADDRESSES ?? "")
+    .split(",")
+    .map((a) => a.trim())
+    .filter(Boolean),
   ws: {
     maxPayloadBytes: parseInt(process.env.WS_MAX_PAYLOAD_BYTES ?? "16384", 10),
     maxConnectionsPerIp: parseInt(process.env.WS_MAX_CONNECTIONS_PER_IP ?? "20", 10),

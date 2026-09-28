@@ -42,6 +42,15 @@ export class MetricsService implements OnModuleInit {
   public readonly leaderElectionIsLeader: client.Gauge<string>;
   public readonly leaderElectionChangesTotal: client.Counter<string>;
 
+  /** Background job metrics (issue #494). */
+  public readonly jobsQueueDepth: client.Gauge<string>;
+  public readonly jobsDuration: client.Histogram<string>;
+  public readonly jobsFailures: client.Counter<string>;
+  public readonly jobsDeadLettered: client.Counter<string>;
+  private queueDepthProvider?: () => Promise<Array<{ queue: string; state: string; count: number }>>;
+
+  /** Feature-flag evaluations (issue #495). */
+  public readonly flagEvaluations: client.Counter<string>;
   // ── WS backplane (issue #454) ─────────────────────────────────────────────
   public readonly wsBackplanePublishDuration: client.Histogram<string>;
   public readonly wsBackplaneDropped: client.Counter<string>;
@@ -264,6 +273,55 @@ export class MetricsService implements OnModuleInit {
       registers: [this.register],
     });
 
+    // ── Background jobs (issue #494) ────────────────────────────────────────
+    // Depth is sampled on scrape from the active queue driver, so it reflects
+    // every instance's shared view of the queue (BullMQ) without a timer.
+    // eslint-disable-next-line @typescript-eslint/no-this-alias
+    const self = this;
+    this.jobsQueueDepth = new client.Gauge({
+      name: `${prefix}jobs_queue_depth`,
+      help: "Jobs per queue and state (waiting, active, delayed, dead_letter)",
+      labelNames: ["queue", "state"],
+      registers: [this.register],
+      async collect() {
+        if (!self.queueDepthProvider) return;
+        this.reset();
+        for (const { queue, state, count } of await self.queueDepthProvider()) {
+          this.set({ queue, state }, count);
+        }
+      },
+    });
+
+    this.jobsDuration = new client.Histogram({
+      name: `${prefix}jobs_duration_seconds`,
+      help: "Job handler latency in seconds",
+      labelNames: ["queue", "job", "outcome"],
+      buckets: [0.01, 0.05, 0.1, 0.5, 1, 5, 15, 60],
+      registers: [this.register],
+    });
+
+    this.jobsFailures = new client.Counter({
+      name: `${prefix}jobs_failures_total`,
+      help: "Failed job attempts (including ones that will be retried)",
+      labelNames: ["queue", "job"],
+      registers: [this.register],
+    });
+
+    this.jobsDeadLettered = new client.Counter({
+      name: `${prefix}jobs_dead_lettered_total`,
+      help: "Jobs moved to the dead-letter queue after exhausting retries",
+      labelNames: ["queue", "job"],
+      registers: [this.register],
+    });
+
+    // ── Feature flags (issue #495) ──────────────────────────────────────────
+    this.flagEvaluations = new client.Counter({
+      name: `${prefix}flag_evaluations_total`,
+      help: "Feature-flag evaluations by flag, resolved value and reason",
+      labelNames: ["flag", "value", "reason"],
+      registers: [this.register],
+    });
+
     // ── WS backplane (issue #454) ────────────────────────────────────────────
     this.wsBackplanePublishDuration = new client.Histogram({
       name: `${prefix}ws_backplane_publish_duration_seconds`,
@@ -326,6 +384,13 @@ export class MetricsService implements OnModuleInit {
       buckets: [0.005, 0.01, 0.05, 0.1, 0.5, 1, 3],
       registers: [this.register],
     });
+  }
+
+  /** Registers the source sampled for `vortex_jobs_queue_depth` on each scrape. */
+  setQueueDepthProvider(
+    provider: () => Promise<Array<{ queue: string; state: string; count: number }>>,
+  ): void {
+    this.queueDepthProvider = provider;
   }
 
   onModuleInit() {

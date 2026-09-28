@@ -2,7 +2,6 @@ import {
   Inject,
   Injectable,
   Logger,
-  OnModuleDestroy,
   Optional,
   ServiceUnavailableException,
 } from "@nestjs/common";
@@ -24,8 +23,8 @@ import { SHADOW_TRANSITIONS, type ShadowTransition } from "../soroban/shadow.typ
 import { MetricsService } from "../metrics/metrics.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { ProtocolParamsService } from "../governance/params.service";
+import { FeatureFlagService } from "../flags/feature-flag.service";
 
-const STORE_SIZE_LOG_INTERVAL_MS = 60_000;
 const TERMINAL_STATES: IntentState[] = ["filled", "cancelled", "expired", "slashed"];
 
 /**
@@ -78,7 +77,7 @@ export const MAX_OPEN_INTENTS_PER_USER = 50;
  * (in-memory ↔ Prisma) without touching this service or anything above it.
  */
 @Injectable()
-export class IntentsService implements OnModuleDestroy {
+export class IntentsService {
   private readonly logger = new Logger(IntentsService.name);
 
   /**
@@ -103,8 +102,6 @@ export class IntentsService implements OnModuleDestroy {
    * DB write failure never blocks or rolls back the underlying state transition.
    */
   private readonly auditLog = new Map<string, IntentAuditEntry[]>();
-
-  private readonly sizeLogTimer: ReturnType<typeof setInterval>;
 
   constructor(
     @Inject(INTENTS_REPOSITORY)
@@ -132,21 +129,16 @@ export class IntentsService implements OnModuleDestroy {
      */
     @Optional() private readonly metricsService?: MetricsService,
     private readonly protocolParamsService: ProtocolParamsService,
-  ) {
-    const sweepMs = Number(this.configService.get("intentRetentionSweepMs", { infer: true }) ?? STORE_SIZE_LOG_INTERVAL_MS);
-    this.sizeLogTimer = setInterval(() => this.logStoreSize(), sweepMs || STORE_SIZE_LOG_INTERVAL_MS);
-    // Allow the process to exit even if the timer is still active.
-    this.sizeLogTimer.unref?.();
-  }
-
-  onModuleDestroy() {
-    clearInterval(this.sizeLogTimer);
-  }
+    @Optional() private readonly flags?: FeatureFlagService,
+  ) {}
 
   /**
    * Logs the store size and evicts stale terminal intents from the in-memory
    * adapter when it is the active backend. This keeps the memory footprint
    * bounded without affecting on-chain or durable storage paths.
+   *
+   * Runs as the `intents.store-size` background job (see
+   * intents-maintenance.jobs.ts, issue #494) rather than a local timer.
    */
   async logStoreSize(): Promise<void> {
     const evicted = await this.evictTerminalIntents();
@@ -262,7 +254,15 @@ export class IntentsService implements OnModuleDestroy {
       paramsVersion: paramsSnapshot.version,
     };
 
-    if (this.configService.get("onchainIntentsEnabled", { infer: true })) {
+    // ONCHAIN_INTENTS_ENABLED is the default; the `onchain-intents-enabled`
+    // runtime flag (issue #495) can roll it out per chain / percentage.
+    const onchain = this.flags
+      ? await this.flags.getBooleanValue("onchain-intents-enabled", {
+          targetingKey: intent.intentId,
+          chain: intent.srcChain,
+        })
+      : this.configService.get("onchainIntentsEnabled", { infer: true });
+    if (onchain) {
       await this.registerOnChain(intent);
     }
 
