@@ -62,6 +62,9 @@ import {
 } from "../killswitch/killswitch.guard";
 import { KillSwitchService } from "../killswitch/killswitch.service";
 import { KillSwitchOperation } from "../killswitch/killswitch.types";
+import { ConfigService } from "@nestjs/config";
+import { AppConfig } from "../config/configuration";
+import { isCanaryIntent } from "../common/canary";
 
 @ApiTags("intents")
 @Controller("api/v1/intents")
@@ -73,7 +76,13 @@ export class IntentsController {
     private readonly tokensService: TokensService,
     private readonly routingService: RoutingService,
     private readonly killSwitch: KillSwitchService,
-  ) {}
+    config: ConfigService<AppConfig, true>,
+  ) {
+    this.canary = new Set(config.get("canaryAddresses", { infer: true }) ?? []);
+  }
+
+  /** Canary addresses (issue #496). */
+  private readonly canary: ReadonlySet<string>;
 
   /**
    * Re-assert the kill-switch hierarchy against a *loaded* intent.
@@ -356,6 +365,14 @@ export class IntentsController {
     }
     if (!solver.bondAmount || BigInt(solver.bondAmount) <= 0n) {
       throw new ForbiddenException("Solver has insufficient bond");
+    }
+    if (this.solversService.isSuspended(dto.solver)) {
+      throw new ForbiddenException("Solver is suspended by an active guardian action");
+    }
+    // Canary intents pair only with canary solvers (issue #496) so synthetic
+    // traffic never affects real solvers' stats or real users' fills.
+    if (isCanaryIntent(intent, this.canary) !== this.canary.has(dto.solver)) {
+      throw new ForbiddenException("Canary intents may only be accepted by canary solvers, and vice versa");
     }
 
     const updated = await this.intentsService.acceptIfOpen(id, dto.solver, now);

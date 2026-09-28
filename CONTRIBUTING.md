@@ -18,9 +18,10 @@
 7. [Module and file structure](#module-and-file-structure)
 8. [Adding a new endpoint](#adding-a-new-endpoint)
 9. [Environment variables](#environment-variables)
-10. [Regenerating the API client SDK](#regenerating-the-api-client-sdk)
-11. [Commit messages](#commit-messages)
-12. [Submitting a pull request](#submitting-a-pull-request)
+10. [Database migrations](#database-migrations)
+11. [Regenerating the API client SDK](#regenerating-the-api-client-sdk)
+12. [Commit messages](#commit-messages)
+13. [Submitting a pull request](#submitting-a-pull-request)
 
 ---
 
@@ -110,6 +111,8 @@ docker compose up --build
 | `npm run solver:demo` | Run the reference solver bot (see [`scripts/README.md`](./scripts/README.md)) |
 | `npm run seed` | Seed the database with sample data |
 | `npm run db:migrate` | Run pending Prisma migrations against the local DB |
+| `npm run check:migrations` | Lint changed migrations for unsafe DDL and a missing `down.sql` (see [Database migrations](#database-migrations)) |
+| `npm run test:scripts` | Tests for the tooling in `scripts/` (e.g. the migration checker's fixtures) |
 
 Run the full verification suite before opening a PR:
 
@@ -398,6 +401,30 @@ This repository is licensed under the [MIT License](./LICENSE). Because the
 project is permissive by default, source files do not require a per-file SPDX or
 copyright banner; just keep the repo-level license in place and avoid adding
 custom header text that conflicts with it.
+
+---
+
+## Database migrations
+
+Migrations live in [`prisma/migrations/`](./prisma/migrations/). Every migration
+must ship a hand-authored `down.sql` for rollback, and changed migrations are
+linted for unsafe DDL by the `migration-lint` CI job. See
+[`prisma/migrations/README.md`](./prisma/migrations/README.md) for the full rule
+set and the `-- squawk-ignore` suppression convention.
+
+```bash
+npm run check:migrations                # lint migrations changed since HEAD^1
+npm run check:migrations -- --base <sha>  # lint migrations changed since <sha>
+npm run test:scripts                    # run the checker's fixture tests
+```
+
+When you add a migration, make sure it:
+
+1. includes a `down.sql` that reverses `migration.sql`;
+2. builds/drops indexes with `CONCURRENTLY`;
+3. avoids `ALTER COLUMN … TYPE`, `SET NOT NULL` without a `DEFAULT`, and
+   `LOCK TABLE` — or suppresses them with `-- squawk-ignore <rule>` **plus** a
+   `-- justification:` comment (and repeat that justification in the PR).
 
 ---
 

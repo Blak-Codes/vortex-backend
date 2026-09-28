@@ -97,7 +97,6 @@ describe("IntentsService.create — idempotency race safety (#274)", () => {
   let harness: Harness;
 
   afterEach(() => {
-    harness?.service.onModuleDestroy();
     jest.restoreAllMocks();
   });
 
