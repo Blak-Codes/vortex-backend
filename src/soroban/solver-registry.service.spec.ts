@@ -30,15 +30,25 @@ function makeConfigService(
     wsMaxConnections: 1000,
     wsBackplane: "memory",
     redisUrl: "redis://localhost:6379",
-    datasets: {
+    // Resource-exhaustion limits (issue #476) — test defaults
+    jsonMaxDepth: 10,
+    wsMaxFilterChains: 20,
+    wsMaxSubscriptions: 10,
+    dbQueryTimeoutMs: 5000,
+    dbBatchQueryTimeoutMs: 10000,
+    dbStatsQueryTimeoutMs: 15000,
+    // Emergency kill-switch (issue #477) — no operator token in unit tests, so
+    // the control plane stays disabled.
+    killswitch: {
+      operatorToken: "",
+      redisUrl: "",
+      pollMs: 2000,
+    governance: {
+      paramsContractId: "",
+      paramsPollIntervalMs: 30_000,
+    leaderElection: {
       enabled: false,
-      anonymize: true,
-      salt: "",
-      saltRotationHours: 24,
-      saltRetentionWindows: 2,
-      publicBucket: "vortex-public-datasets",
-      storageKind: "memory",
-      localDir: ".datasets",
+      heartbeatMs: 5000,
     },
   };
   return {

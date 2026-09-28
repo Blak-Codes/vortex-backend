@@ -120,6 +120,27 @@ export interface IIntentsRepository {
   expireIfOpen(id: string): Intent | null | Promise<Intent | null>;
 
   /**
+   * Atomically push an accepted intent's deadline out to at least `newDeadline`,
+   * only while it is still in the `accepted` state.  Mirrors the DB pattern:
+   *   UPDATE intents SET deadline=$2
+   *   WHERE intent_id=$1 AND state='accepted' AND deadline < $2
+   *   RETURNING *
+   *
+   * Issue #477: while an emergency pause covers `fill`, the sweeper cannot slash
+   * missed fills — but leaving the deadline untouched would expire those intents
+   * on the next cycle anyway and penalise the solver for a pause they did not
+   * cause.  The `deadline < $2` guard makes this idempotent and never shortens
+   * a window, and the state predicate means a concurrent fill or slash wins.
+   *
+   * Returns the updated intent, or `null` when the intent is no longer accepted
+   * or already has a later deadline.
+   */
+  extendDeadlineIfAccepted(
+    id: string,
+    newDeadline: number,
+  ): Intent | null | Promise<Intent | null>;
+
+  /**
    * Atomically transition an intent from `accepted` → `slashed` only if it is
    * currently in the `accepted` state.  Guards the sweeper's slashing pass
    * against a concurrent solver fill().
@@ -229,6 +250,17 @@ export class InMemoryIntentsRepository implements IIntentsRepository {
     const existing = this.store.get(id);
     if (!existing || existing.state !== "accepted") return null;
     const updated: Intent = { ...existing, ...patch, state: "slashed" };
+    this.store.set(id, updated);
+    return updated;
+  }
+
+  extendDeadlineIfAccepted(id: string, newDeadline: number): Intent | null {
+    const existing = this.store.get(id);
+    if (!existing || existing.state !== "accepted") return null;
+    // Never shorten: a later deadline is left untouched so repeated sweeps are
+    // no-ops rather than a countdown.
+    if (existing.deadline >= newDeadline) return null;
+    const updated: Intent = { ...existing, deadline: newDeadline };
     this.store.set(id, updated);
     return updated;
   }

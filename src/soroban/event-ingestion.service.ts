@@ -1,10 +1,13 @@
-import { Injectable, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
+import { Injectable, OnModuleDestroy, OnModuleInit, Optional } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { scValToNative, SorobanRpc } from "@stellar/stellar-sdk";
 import { AppConfig } from "../config/configuration";
 import { logger } from "../common/logger";
+import { IntentsService } from "../intents/intents.service";
+import { MetricsService } from "../metrics/metrics.service";
 import { SorobanService } from "./soroban.service";
 import { SolversService } from "../solvers/solvers.service";
+import { LeaderElectionService, Singleton } from "../common/leader-election";
 
 const POLL_INTERVAL_MS = 10_000;
 const RECONCILE_INTERVAL_MS = 60_000;
@@ -33,6 +36,7 @@ export function buildDedupeKey({ ledgerSequence, eventIndex }: DedupeKeyParts): 
   return `${ledgerSequence}:${eventIndex}`;
 }
 
+@Singleton("event-ingestion")
 @Injectable()
 export class EventIngestionService implements OnModuleInit, OnModuleDestroy {
   private interval?: NodeJS.Timeout;
@@ -43,15 +47,58 @@ export class EventIngestionService implements OnModuleInit, OnModuleDestroy {
   processedCount = 0;
   duplicateCount = 0;
 
+  /**
+   * Ledger of the newest event ingested, used to publish the ingestion-lag
+   * gauge (issue #481).
+   *
+   * `undefined` until the first event arrives, which is also how "we have never
+   * ingested anything" is distinguished from "we are perfectly current": the
+   * gauge is left untouched rather than being published as a confident zero.
+   */
+  private newestIngestedLedger?: number;
+
   constructor(
     private readonly sorobanService: SorobanService,
     private readonly configService: ConfigService<AppConfig, true>,
     private readonly solversService: SolversService,
+    /**
+     * SLO emitters for the on-chain dashboard. `@Optional()` so the unit tests
+     * that construct this service directly do not need a metrics registry;
+     * `MetricsModule` is `@Global()`, so the running application always has one.
+     */
+    @Optional() private readonly metricsService?: MetricsService,
+    /**
+     * Read-only lookup used to time an off-chain fill against its on-chain
+     * confirmation. Optional for the same reason as `metricsService`, and
+     * because `EventIngestionService` is also instantiated in `SorobanModule`,
+     * where the intent service is reached through a `forwardRef`.
+     */
+    @Optional() private readonly intentsService?: IntentsService,
+    private readonly leaderElection: LeaderElectionService,
   ) {}
 
   onModuleInit() {
+    this.leaderElection.registerWorker("event-ingestion", (isLeader, _token) => {
+      if (isLeader) {
+        logger.info("[event-ingestion] became leader — starting polling intervals");
+        this.startIntervals();
+      } else {
+        logger.info("[event-ingestion] lost leadership — stopping polling intervals");
+        this.stopIntervals();
+      }
+    });
+  }
+
+  onModuleDestroy() {
+    this.stopIntervals();
+  }
+
+  private startIntervals(): void {
+    if (this.interval) return; // already running
     this.interval = setInterval(() => {
-      this.poll().catch((err) => logger.error(`[event-ingestion] poll failed: ${err instanceof Error ? err.message : String(err)}`));
+      this.poll().catch((err) =>
+        logger.error(`[event-ingestion] poll failed: ${err instanceof Error ? err.message : String(err)}`),
+      );
     }, POLL_INTERVAL_MS);
 
     this.reconcileInterval = setInterval(() => {
@@ -63,9 +110,15 @@ export class EventIngestionService implements OnModuleInit, OnModuleDestroy {
     }, RECONCILE_INTERVAL_MS);
   }
 
-  onModuleDestroy() {
-    if (this.interval) clearInterval(this.interval);
-    if (this.reconcileInterval) clearInterval(this.reconcileInterval);
+  private stopIntervals(): void {
+    if (this.interval) {
+      clearInterval(this.interval);
+      this.interval = undefined;
+    }
+    if (this.reconcileInterval) {
+      clearInterval(this.reconcileInterval);
+      this.reconcileInterval = undefined;
+    }
   }
 
   async poll(): Promise<void> {
@@ -88,6 +141,43 @@ export class EventIngestionService implements OnModuleInit, OnModuleDestroy {
     }
 
     this.nextStartLedger = response.latestLedger + 1;
+    await this.publishIngestionLag();
+  }
+
+  /**
+   * Publish `vortex_event_ingestion_lag_seconds`: how far behind the chain head
+   * this process is (issue #481).
+   *
+   * The lag is measured against the close time of the newest ledger we actually
+   * ingested an event from, not against the newest ledger that exists — the
+   * former is the number that says whether a client is seeing settlement
+   * promptly, and it is the one `VortexIngestionLagHigh` is built to alert on.
+   *
+   * One extra RPC per poll, and only once at least one event has been seen.
+   * Any failure leaves the gauge at its previous value rather than writing a
+   * bogus zero: a metric that snaps to 0 during an RPC outage is worse than one
+   * that goes stale.
+   */
+  private async publishIngestionLag(): Promise<void> {
+    if (!this.metricsService || this.newestIngestedLedger === undefined) return;
+    try {
+      const header = await this.sorobanService.getLedger(this.newestIngestedLedger);
+      const closeTime = Number(header?.header?.closeTime);
+      if (!Number.isFinite(closeTime) || closeTime <= 0) {
+        logger.debug(
+          `[event-ingestion] ledger ${this.newestIngestedLedger} reported no usable closeTime; leaving ingestion lag unchanged`,
+        );
+        return;
+      }
+      const lagSeconds = Math.max(0, Math.floor(Date.now() / 1000) - closeTime);
+      this.metricsService.setIngestionLag(lagSeconds);
+    } catch (err) {
+      logger.debug(
+        `[event-ingestion] could not read ledger ${this.newestIngestedLedger} for the ingestion-lag gauge: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
   }
 
   // Skips events already seen at this ledger+index, which protects against
@@ -106,6 +196,9 @@ export class EventIngestionService implements OnModuleInit, OnModuleDestroy {
     this.markSeen(dedupeKey);
     this.processEvent(event);
     this.processedCount++;
+    if (this.newestIngestedLedger === undefined || event.ledger > this.newestIngestedLedger) {
+      this.newestIngestedLedger = event.ledger;
+    }
     return true;
   }
 
@@ -128,7 +221,16 @@ export class EventIngestionService implements OnModuleInit, OnModuleDestroy {
 
     const eventName = typeof topic[0] === "string" ? topic[0] : undefined;
     if (eventName === "intent_filled") {
-      this.handleIntentFilled(event, topic);
+      // Fire-and-forget for the same reason as `solver_slashed`: timing a
+      // confirmation must never stall the poll loop, and a lookup failure is
+      // logged rather than propagated.
+      this.handleIntentFilled(event, topic).catch((err) =>
+        logger.error(
+          `[event-ingestion] intent_filled confirmation timing failed at ledger=${event.ledger}: ${
+            (err as Error).message
+          }`,
+        ),
+      );
     } else if (eventName === "solver_slashed") {
       // Fire-and-forget: penalty confirmation is non-blocking relative to
       // ingestion — a reconciliation failure is logged but never stalls the
@@ -146,10 +248,38 @@ export class EventIngestionService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private handleIntentFilled(event: SorobanRpc.Api.EventResponse, topic: unknown[]): void {
+  /**
+   * Record a confirmed on-chain fill and time it against the off-chain fill.
+   *
+   * `vortex_tx_confirmation_duration_seconds` is the settlement-pipeline SLO
+   * SLI: how long a fill takes to appear on chain after the off-chain path
+   * recorded it. The off-chain timestamp is the intent's own `filledAt`, so the
+   * two sides are joined by intent id — an event for an intent this process has
+   * never seen, or one still awaiting its off-chain write, is skipped rather
+   * than recorded as an implausibly large (or negative) latency.
+   */
+  private async handleIntentFilled(
+    event: SorobanRpc.Api.EventResponse,
+    topic: unknown[],
+  ): Promise<void> {
     logger.info(
       `[event-ingestion] intent_filled event at ledger=${event.ledger} txHash=${event.txHash} topic=${JSON.stringify(topic)}`,
     );
+
+    const intentId = typeof topic[1] === "string" ? topic[1] : undefined;
+    if (!intentId || !this.metricsService || !this.intentsService) return;
+
+    const intent = await this.intentsService.get(intentId);
+    const filledAt = intent?.filledAt;
+    if (typeof filledAt !== "number" || filledAt <= 0) {
+      logger.debug(
+        `[event-ingestion] intent_filled for ${intentId} has no off-chain fill timestamp yet; not observing confirmation latency`,
+      );
+      return;
+    }
+
+    const confirmationSeconds = Math.max(0, Math.floor(Date.now() / 1000) - filledAt);
+    this.metricsService.observeTxConfirmation(confirmationSeconds);
   }
 
   private async reconcileStaleIntents(): Promise<void> {

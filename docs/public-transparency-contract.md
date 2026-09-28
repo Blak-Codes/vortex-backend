@@ -2,9 +2,39 @@
 
 The public protocol transparency endpoint is intentionally designed as a stable contract for community dashboards and external reporting.
 
-## Endpoint
+## Endpoints
 
-- GET /api/v1/stats/public
+### GET /api/v1/stats/public
+
+Legacy stats endpoint with protocol-wide metrics.
+
+### GET /api/v1/treasury/reconciliation
+
+Treasury reconciliation summary endpoint showing expected vs actual treasury balances per asset. Added to support governance decisions and public reporting with on-chain verification.
+
+**Query Parameters:**
+- `date` (optional): Date in YYYY-MM-DD format (defaults to today)
+
+**Response:**
+```json
+{
+  "date": "2026-09-28",
+  "assets": [
+    {
+      "asset": "native",
+      "expectedBalance": "1000000000",
+      "actualBalance": "1000500000",
+      "discrepancy": "500000",
+      "discrepancyPercentage": 0.05,
+      "hasUnexplainedDiscrepancy": false,
+      "explanation": "Discrepancy within tolerance threshold..."
+    }
+  ],
+  "totalDiscrepancies": 3,
+  "assetsWithUnexplainedDiscrepancies": 1,
+  "lastReconciliationAt": "2026-09-28T00:00:00.000Z"
+}
+```
 
 ## Stability policy
 
