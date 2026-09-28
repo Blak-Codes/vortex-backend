@@ -1,5 +1,6 @@
 import { Injectable, Optional } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
+import { createHmac } from "crypto";
 import { AppConfig } from "../config/configuration";
 import { isCanaryIntent } from "../common/canary";
 import { IntentsService } from "../intents/intents.service";
@@ -23,6 +24,56 @@ export class StatsService {
 
   private async publicIntents() {
     return (await this.intentsService.getAll()).filter((i) => !isCanaryIntent(i, this.canary));
+  }
+
+  private canonicalJson(value: unknown): string {
+    const seen = new WeakSet();
+
+    const normalize = (input: unknown): unknown => {
+      if (Array.isArray(input)) {
+        return input.map((item) => normalize(item));
+      }
+      if (input && typeof input === "object") {
+        if (seen.has(input)) {
+          return "[Circular]";
+        }
+        seen.add(input);
+        return Object.keys(input as Record<string, unknown>)
+          .sort()
+          .reduce<Record<string, unknown>>((acc, key) => {
+            acc[key] = normalize((input as Record<string, unknown>)[key]);
+            return acc;
+          }, {});
+      }
+      return input;
+    };
+
+    return JSON.stringify(normalize(value));
+  }
+
+  private getPublicDatasetUrl() {
+    return process.env.PUBLIC_STATS_DATASET_URL ?? "https://example.invalid/public-stats/latest.json";
+  }
+
+  private getPublicSigningKey() {
+    return process.env.PUBLIC_STATS_SIGNING_KEY ?? "public-stats-dev-key";
+  }
+
+  private getProvenance(payload: Record<string, unknown>) {
+    const safePayload = { ...payload };
+    delete safePayload.provenance;
+    const generatedAt = new Date().toISOString();
+    const signature = createHmac("sha256", this.getPublicSigningKey())
+      .update(this.canonicalJson({ ...safePayload, generatedAt }))
+      .digest("hex");
+
+    return {
+      watermarkLedger: 0,
+      generatedAt,
+      queryVersion: "public-stats/v1",
+      datasetUrl: this.getPublicDatasetUrl(),
+      signature,
+    };
   }
 
   async getProtocolStats() {
@@ -49,6 +100,18 @@ export class StatsService {
       avgFillTime: Math.round(avgFillTime),
       fillRate: intents.length ? filled.length / intents.length : 0,
     };
+  }
+
+  async getPublicStats() {
+    const stats = await this.getProtocolStats();
+    return {
+      ...stats,
+      provenance: this.getProvenance(stats),
+    };
+  }
+
+  getPublicStatsHistory() {
+    return [] as Array<Record<string, unknown>>;
   }
 
   async getTreasuryStats() {
