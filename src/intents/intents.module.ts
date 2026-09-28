@@ -7,16 +7,29 @@ import { IntentsSweeperService } from "./intents-sweeper.service";
 import { IntentsMaintenanceJobs } from "./intents-maintenance.jobs";
 import { INTENTS_REPOSITORY, InMemoryIntentsRepository } from "./intents.repository";
 import { PrismaIntentsRepository } from "./prisma-intents.repository";
+import { IntentCapabilityIndex } from "./solver-intent-matcher";
 import { SolversModule } from "../solvers/solvers.module";
 import { RoutingModule } from "../routing/routing.module";
 import { TokensModule } from "../tokens/tokens.module";
 import { SorobanModule } from "../soroban/soroban.module";
-import { EventIngestionService } from "../soroban/event-ingestion.service";
 import { AppConfig } from "../config/configuration";
 import { PrismaService } from "../prisma/prisma.service";
+import { GovernanceModule } from "../governance/governance.module";
 
 @Module({
-  imports: [forwardRef(() => SolversModule), RoutingModule, TokensModule, SorobanModule],
+  // Both SolversModule and SorobanModule import IntentsModule back, so both
+  // edges of each cycle must be deferred — a bare import resolves to `undefined`
+  // when the peer module is still mid-initialization (AppModule reaches
+  // SorobanModule through HealthModule before IntentsModule has finished).
+  // `forwardRef` on the SorobanModule import mirrors the one in SorobanModule:
+  // the two modules need each other (ShadowService here, IntentsService there).
+  imports: [
+    forwardRef(() => SolversModule),
+    RoutingModule,
+    TokensModule,
+    forwardRef(() => SorobanModule),
+  ],
+  imports: [forwardRef(() => SolversModule), RoutingModule, TokensModule, SorobanModule, GovernanceModule],
   controllers: [IntentsController],
   providers: [
     // Select the persistence adapter based on INTENTS_PERSISTENCE env var.
@@ -34,11 +47,13 @@ import { PrismaService } from "../prisma/prisma.service";
       },
     },
     IntentsService,
+    IntentCapabilityIndex,
     IntentsGateway,
     IntentsSweeperService,
     IntentsMaintenanceJobs,
-    EventIngestionService,
+    // Note: EventIngestionService is provided by SorobanModule (imported above)
+    // and exported from there — no re-declaration needed here.
   ],
-  exports: [IntentsService, IntentsGateway],
+  exports: [IntentsService, IntentsGateway, IntentCapabilityIndex],
 })
 export class IntentsModule {}

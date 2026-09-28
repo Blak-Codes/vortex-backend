@@ -1,4 +1,4 @@
-# ADR 0001: Durable Job Queue — BullMQ on Redis
+# ADR 0002: Durable Job Queue — BullMQ on Redis
 
 - **Status**: Accepted
 - **Date**: 2026-09-28

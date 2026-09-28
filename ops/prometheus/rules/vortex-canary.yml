@@ -14,7 +14,7 @@ groups:
           severity: page
         annotations:
           summary: "Canary lifecycle failing on {{ $labels.network }}"
-          description: "No successful create→quote→accept→fill→confirm run in 3 intervals. See docs/runbooks/on-call.md#scenario-d--synthetic-canary-failing"
+          description: "No successful create→quote→accept→fill→confirm run in 3 intervals. See docs/runbooks/on-call.md#scenario-e--synthetic-canary-failing"
 
       - alert: VortexCanaryFundsLow
         expr: vortex_canary_balance_xlm < vortex_canary_min_balance_xlm

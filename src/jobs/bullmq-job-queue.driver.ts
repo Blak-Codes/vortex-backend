@@ -16,7 +16,7 @@ const COMPLETED_RETENTION_SECONDS = 86_400;
 const DLQ_SUFFIX = "-dlq";
 
 /**
- * Durable driver on BullMQ + Redis (see docs/adr/0001-job-queue.md).
+ * Durable driver on BullMQ + Redis (see docs/adr/0002-job-queue.md).
  *
  * - Retries: BullMQ `attempts` + exponential `backoff`.
  * - DLQ: once the last attempt fails the job is copied to `<queue>-dlq`,

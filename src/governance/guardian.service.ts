@@ -4,6 +4,7 @@ import {
   NotFoundException,
   OnModuleDestroy,
   OnModuleInit,
+  Optional,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { AppConfig } from "../config/configuration";
@@ -13,7 +14,8 @@ import { AdminPrincipal } from "../admin/admin-auth";
 import { SorobanService } from "../soroban/soroban.service";
 import { parseEventIndex } from "../soroban/event-ingestion.service";
 import { decodeGuardianEvent, GuardianEvent } from "../soroban/events/guardian-events";
-import { ALL_PARAMS, KillSwitchService, StateRef } from "../killswitch/killswitch.service";
+import { KillSwitchService } from "../killswitch/killswitch.service";
+import { ALL_PARAMS, GuardianStateService, StateRef } from "./guardian-state.service";
 
 /** Guardian actions are applied within one poll of this interval. */
 export const GUARDIAN_POLL_INTERVAL_MS = 10_000;
@@ -40,8 +42,8 @@ function isAfter(a: { ledger: number; id: string }, b: { ledger: number; id: str
 /**
  * Guardian emergency signal ingestion (issue #507).
  *
- * Polls the guardian contract and derives kill-switch, solver-suspension and
- * parameter-freeze state from its events. While a guardian action is active
+ * Polls the guardian contract and derives pause, solver-suspension and
+ * parameter-freeze state ({@link GuardianStateService}) from its events. While a guardian action is active
  * it is authoritative: operators cannot clear it — only a later guardian
  * event or an audited superadmin {@link override} can.
  *
@@ -59,10 +61,11 @@ export class GuardianService implements OnModuleInit, OnModuleDestroy {
 
   constructor(
     private readonly soroban: SorobanService,
-    private readonly killSwitch: KillSwitchService,
+    private readonly state: GuardianStateService,
     private readonly prisma: PrismaService,
     private readonly audit: AdminAuditService,
     config: ConfigService<AppConfig, true>,
+    @Optional() private readonly killSwitch?: KillSwitchService,
   ) {
     this.contractId = config.get("guardianContractId", { infer: true });
   }
@@ -164,13 +167,17 @@ export class GuardianService implements OnModuleInit, OnModuleDestroy {
     return record;
   }
 
-  /** Public status: effective pause and active guardian actions with tx references. */
+  /**
+   * Public status: active guardian actions with tx references, plus any
+   * active operator kill switches (#477) so both pause sources are visible.
+   */
   status() {
-    const snapshot = this.killSwitch.snapshot();
+    const operatorSwitches = this.killSwitch?.status().switches.filter((s) => s.active) ?? [];
+    const guardianPaused = this.state.pauseRef() !== null;
     return {
-      paused: snapshot.paused,
-      pauseSources: Object.keys(snapshot.pause),
-      operatorPause: snapshot.pause.operator ?? null,
+      paused: guardianPaused || operatorSwitches.some((s) => s.scope === "global"),
+      guardianPaused,
+      operatorSwitches,
       guardianActions: [...this.active.values()].sort((a, b) => a.ledger - b.ledger),
       ingestionEnabled: Boolean(this.contractId),
       nextLedger: this.cursor ?? null,
@@ -202,9 +209,9 @@ export class GuardianService implements OnModuleInit, OnModuleDestroy {
 
   private project(record: GuardianActionRecord, active: boolean, reason: string): void {
     const ref: StateRef = { since: record.activatedAt, reason, actionId: record.id, txHash: record.txHash };
-    if (record.kind === "pause") this.killSwitch.setPause("guardian", active, ref);
-    else if (record.kind === "freeze") this.killSwitch.setParamFrozen(record.target || ALL_PARAMS, active, ref);
-    else this.killSwitch.setSolverSuspended(record.target, active, ref);
+    if (record.kind === "pause") this.state.setPause(active, ref);
+    else if (record.kind === "freeze") this.state.setParamFrozen(record.target || ALL_PARAMS, active, ref);
+    else this.state.setSolverSuspended(record.target, active, ref);
   }
 
   /** State is already applied in memory; persistence failures are logged, not fatal. */

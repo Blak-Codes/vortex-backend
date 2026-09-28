@@ -8,6 +8,7 @@ import { AppConfig } from "../config/configuration";
 import { InMemoryIntentsRepository } from "./intents.repository";
 import { logger } from "../common/logger";
 import { buildWsAuthMessage } from "../common/stellar-signature";
+import { ProtocolParamsService } from "../governance/params.service";
 
 jest.mock("../common/logger", () => ({
   logger: {
@@ -29,11 +30,15 @@ function makeIntentsService(): IntentsService {
     },
   } as unknown as PrismaService;
   const repo = new InMemoryIntentsRepository();
+  const protocolParams = {
+    snapshotForChain: jest.fn().mockReturnValue({ version: 0, feeBps: 30, deadlineSeconds: 1800, fillWindowSeconds: 600, capturedAt: new Date().toISOString() }),
+  } as unknown as ProtocolParamsService;
   return new IntentsService(
     repo,
     configService,
     {} as StellarTxService,
     prismaService,
+    protocolParams,
   );
 }
 

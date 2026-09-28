@@ -22,6 +22,7 @@ import {
   ApiBadRequestResponse,
   ApiTooManyRequestsResponse,
   ApiOperation,
+  ApiServiceUnavailableResponse,
 } from "@nestjs/swagger";
 import { Throttle } from "@nestjs/throttler";
 import { IntentsService } from "./intents.service";
@@ -40,7 +41,6 @@ import { QuoteResponseDto } from "./dto/quote-response.dto";
 import { ListIntentsDto } from "./dto/list-intents.dto";
 import { BatchLookupDto } from "./dto/batch-lookup.dto";
 import { UserThrottlerGuard } from "./user-throttler.guard";
-import { KillSwitchGuard } from "../killswitch/killswitch.guard";
 import {
   verifyStellarSignature,
   buildAcceptMessage,
@@ -54,7 +54,14 @@ import {
   toDecimalNumber,
   varianceScaleFromPerfScore,
 } from "../common/amount";
-import { SupportedChain } from "./intents.types";
+import { Intent, SupportedChain } from "./intents.types";
+import {
+  assertNotPaused,
+  KillSwitchGate,
+  KillSwitchGuard,
+} from "../killswitch/killswitch.guard";
+import { KillSwitchService } from "../killswitch/killswitch.service";
+import { KillSwitchOperation } from "../killswitch/killswitch.types";
 import { ConfigService } from "@nestjs/config";
 import { AppConfig } from "../config/configuration";
 import { isCanaryIntent } from "../common/canary";
@@ -68,6 +75,7 @@ export class IntentsController {
     private readonly intentsGateway: IntentsGateway,
     private readonly tokensService: TokensService,
     private readonly routingService: RoutingService,
+    private readonly killSwitch: KillSwitchService,
     config: ConfigService<AppConfig, true>,
   ) {
     this.canary = new Set(config.get("canaryAddresses", { infer: true }) ?? []);
@@ -75,6 +83,30 @@ export class IntentsController {
 
   /** Canary addresses (issue #496). */
   private readonly canary: ReadonlySet<string>;
+
+  /**
+   * Re-assert the kill-switch hierarchy against a *loaded* intent.
+   *
+   * `KillSwitchGuard` runs before the handler and can only read the route path
+   * and body. For `:id` routes that is not enough to evaluate a chain- or
+   * token-scoped pause, so `accept` and `fill` call this once the record is in
+   * hand. The global-scope and snapshot-readiness checks are still done by the
+   * guard, so this is strictly additional coverage, not a replacement.
+   */
+  private assertIntentNotPaused(intent: Intent, operation: KillSwitchOperation): void {
+    assertNotPaused(
+      this.killSwitch,
+      {
+        chain: intent.srcChain,
+        // Prefer the contract address: symbols are not unique within a chain,
+        // so a symbol-scoped pause would over-match and an address-scoped one
+        // would under-match. Operators pause by address.
+        token: intent.srcToken?.address ?? null,
+        operation,
+      },
+      { retryAfterSeconds: 30 },
+    );
+  }
 
   @Get()
   @ApiBadRequestResponse({ description: "Invalid limit or offset" })
@@ -208,7 +240,8 @@ export class IntentsController {
    * Issue #45 — additionally throttle per dto.user: 10 creates / 60 s.
    */
   @Post()
-  @UseGuards(KillSwitchGuard, UserThrottlerGuard)
+  @UseGuards(UserThrottlerGuard, KillSwitchGuard)
+  @KillSwitchGate({ operation: "create" })
   @ApiTooManyRequestsResponse({
     description:
       "Rate limit exceeded — max 10 intent creations per user per 60 s (or 100 req/min per IP globally)",
@@ -233,11 +266,11 @@ export class IntentsController {
         `Open-intent cap reached — max ${MAX_OPEN_INTENTS_PER_USER} open/accepted intents per user`,
       );
     }
-    const srcToken = this.tokensService.resolveSrcTokenOrThrow(
+    const srcToken = await this.tokensService.resolveSrcTokenOrThrow(
       dto.srcChain as SupportedChain,
       dto.srcTokenAddress,
     );
-    const dstToken = this.tokensService.resolveDstTokenOrThrow(dto.dstTokenContract);
+    const dstToken = await this.tokensService.resolveDstTokenOrThrow(dto.dstTokenContract);
 
     const intent = await this.intentsService.create(
       {
@@ -297,6 +330,7 @@ export class IntentsController {
 
   @Post(":id/accept")
   @UseGuards(KillSwitchGuard)
+  @KillSwitchGate({ operation: "accept" })
   @ApiNotFoundResponse({ description: "Intent not found" })
   @ApiConflictResponse({ description: "Intent is not in open state" })
   @ApiGoneResponse({ description: "Intent has expired" })
@@ -307,6 +341,12 @@ export class IntentsController {
     // deadline > now in SQL), so a concurrent cancel/expiry always wins.
     const intent = await this.intentsService.get(id);
     if (!intent) throw new NotFoundException("Intent not found");
+
+    // The guard above can only see the path parameter, so it could not know
+    // which chain/token this intent belongs to. Re-assert now that the record
+    // is loaded, otherwise a chain- or token-scoped pause would not stop
+    // accepts. Deliberately placed after the 404 so an unknown id still 404s.
+    this.assertIntentNotPaused(intent, "accept");
 
     const now = Math.floor(Date.now() / 1000);
     if (intent.deadline <= now) {
@@ -358,7 +398,11 @@ export class IntentsController {
 
   @Post(":id/fill")
   @UseGuards(KillSwitchGuard)
+  @KillSwitchGate({ operation: "fill" })
   @ApiNotFoundResponse({ description: "Intent not found" })
+  @ApiServiceUnavailableResponse({
+    description: "An emergency kill-switch is active for this intent's scope (503 + Retry-After)",
+  })
   @ApiConflictResponse({ description: "Intent is not in accepted state" })
   @ApiForbiddenResponse({ description: "Wrong solver for this intent" })
   @ApiGoneResponse({ description: "Fill window has expired" })
@@ -366,6 +410,10 @@ export class IntentsController {
   async fill(@Param("id") id: string, @Body() dto: FillIntentDto) {
     const intent = await this.intentsService.get(id);
     if (!intent) throw new NotFoundException("Intent not found");
+
+    // Same reason as in `accept`: the route guard cannot resolve the intent's
+    // chain/token from `:id`, so re-assert against the loaded record.
+    this.assertIntentNotPaused(intent, "fill");
 
     const now = Math.floor(Date.now() / 1000);
     if (intent.deadline <= now) {
@@ -473,10 +521,13 @@ export class IntentsController {
     // when a token identifier IS supplied it must resolve — otherwise the quote
     // engine would silently substitute a fake $1 price.
     const srcToken = dto.srcTokenAddress
-      ? this.tokensService.resolveSrcTokenOrThrow(dto.srcChain as SupportedChain, dto.srcTokenAddress)
+      ? await this.tokensService.resolveSrcTokenOrThrow(
+          dto.srcChain as SupportedChain,
+          dto.srcTokenAddress,
+        )
       : undefined;
     const dstToken = dto.dstTokenContract
-      ? this.tokensService.resolveDstTokenOrThrow(dto.dstTokenContract)
+      ? await this.tokensService.resolveDstTokenOrThrow(dto.dstTokenContract)
       : undefined;
 
     const srcAmountBigInt = parseBaseUnits(dto.srcAmount);
@@ -592,7 +643,7 @@ export class IntentsController {
       );
     }
 
-    const solvers = this.solversService.getAll().filter((s) => s.isActive);
+    const solvers = (await this.solversService.getAll()).filter((s) => s.isActive);
     const srcToken = intent.srcToken;
     const dstToken = intent.dstToken;
     const srcAmountBigInt = BigInt(intent.srcAmount);

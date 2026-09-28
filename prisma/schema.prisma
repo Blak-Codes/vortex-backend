@@ -33,6 +33,34 @@ enum SupportedChain {
   avalanche
 }
 
+// ─── Kill-switch scopes (issue #477) ──────────────────────────────────────────
+// A switch is addressed by exactly one of four mutually-exclusive scopes.
+// `global` has no chain/token; `chain` sets chain only; `token` sets chain +
+// token; `operation` narrows further to a single operation name.
+// Evaluation walks GLOBAL → CHAIN → TOKEN → OPERATION and the most specific
+// matching switch wins, so an operation-level resume can never re-open a
+// scope that a broader switch is still holding closed.
+
+enum KillSwitchScope {
+  global
+  chain
+  token
+  operation
+}
+
+/// Operations a switch can gate. Constrained in the application layer (DTO +
+/// normalisation) before it reaches the database, so the enum here is a
+/// backstop rather than the only gate.
+/// Changing this list requires a migration, since Prisma maps it to a real
+/// Postgres enum type.
+enum KillSwitchOperation {
+  create
+  accept
+  fill
+  slash
+  onchain
+}
+
 // ─── Intent ──────────────────────────────────────────────────────────────────
 // Represents a cross-chain swap request submitted by a user.
 // The nested token objects (srcToken / dstToken) are stored as JSONB so the
@@ -103,6 +131,14 @@ model Solver {
   /// Token symbols this solver can handle.
   supportedTokens  Json     @map("supported_tokens")
 
+  // ── On-chain projection fields (issue #399) ───────────────────────────────
+  /// Indicates the authoritative data source: "api" (REST registration) or
+  /// "chain" (projected from solver-registry contract events).
+  source           String   @default("api") @map("source")
+  /// Ledger sequence of the most recent on-chain event that updated this row.
+  /// NULL when source="api" (no on-chain event has been observed yet).
+  chainUpdatedLedger Int?   @map("chain_updated_ledger")
+
   @@index([isActive])
   @@map("solvers")
 }
@@ -152,6 +188,189 @@ model Token {
   @@index([chain])
   @@index([symbol])
   @@map("tokens")
+}
+
+// ─── KillSwitch (issue #477) ─────────────────────────────────────────────────
+// Hierarchical emergency pause. One row per (scope, chain, token, operation)
+// tuple; activating the row closes that scope for the gated operation.
+//
+// Because the unique key is the full scope tuple, "resume" is an idempotent
+// state flip on a single row rather than a delete/insert race between replicas.
+//
+// `scope` is stored alongside the nullable chain/token/operation columns so the
+// row is self-describing; the application maintains that invariant in one place
+// (KillSwitchService.normaliseScope) rather than trusting callers.
+
+model KillSwitch {
+  id        String   @id @default(uuid()) @map("id")
+  scope     KillSwitchScope @map("scope")
+  /// NULL for global scope.
+  chain     String?  @map("chain")
+  /// NULL for global and chain scopes.
+  token     String?  @map("token")
+  /// NULL unless scope = operation.
+  operation KillSwitchOperation? @map("operation")
+
+  /// Canonical encoding of (scope, chain, token, operation), e.g.
+  /// "operation|stellar|USDC|fill". Postgres will not let Prisma build a
+  /// findUnique over nullable columns, so this non-null surrogate carries the
+  /// uniqueness guarantee while the typed columns above stay queryable.
+  scopeKey  String   @unique @map("scope_key")
+
+  /// true = writes are blocked for this scope, false = explicitly resumed.
+  active    Boolean  @map("active")
+  /// Machine-readable reason surfaced to clients as `reason` in the 503 body.
+  reasonCode String @map("reason_code")
+  /// Free-text operator explanation (incident ticket, etc).
+  reason     String  @map("reason")
+  /// Operator identity that activated or resumed the switch.
+  activatedBy String  @map("activated_by")
+
+  /// Unix epoch ms of the last state change. Used as the cheap change-detection
+  /// key for the polling fallback (monotonic: re-pausing bumps it).
+  updatedAt  Int     @map("updated_at")
+
+  createdAt  Int     @map("created_at")
+  /// Unix epoch ms of the last time this switch transitioned active -> inactive.
+  /// Unset while never resumed, so a brand-new row cannot inherit a stale
+  /// cooldown from a previous pause of the same scope.
+  lastResumedAt Int?  @map("last_resumed_at")
+
+  // Resume requires two distinct approvals; see KillSwitchApproval.
+  approvals       KillSwitchApproval[]
+  /// Number of distinct approvals still required before the switch may resume.
+  approvalsRequired Int @default(2) @map("approvals_required")
+
+  @@index([active])
+  @@index([scope, chain, token, operation])
+  /// Backs the polling fallback's "max(updated_at) since last snapshot?" probe.
+  @@index([updatedAt])
+  @@map("kill_switches")
+}
+// ─── KillSwitchApproval (issue #477) ──────────────────────────────────────────
+// One row per operator approval to resume a switch. The resume guard is a
+// count of DISTINCT approver over this table, so a single operator cannot
+// approve twice, and two different operators can never be one person unless the
+// caller lies about identity (the API ties identity to the operator token).
+
+model KillSwitchApproval {
+  id          String   @id @default(uuid()) @map("id")
+  killSwitchId String  @map("kill_switch_id")
+  killSwitch  KillSwitch @relation(fields: [killSwitchId], references: [id], onDelete: Cascade)
+  /// Operator identity that granted this approval. Unique per switch so one
+  /// operator cannot satisfy the two-approval rule alone.
+  approver    String   @map("approver")
+  /// Unix epoch ms.
+  approvedAt  Int      @map("approved_at")
+  /// Optional note explaining the approval.
+  note        String?  @map("note")
+
+  @@unique([killSwitchId, approver])
+  @@index([killSwitchId])
+  @@map("kill_switch_approvals")
+}
+
+// ─── TreasurySnapshot ────────────────────────────────────────────────────────
+// Daily snapshots of expected vs actual treasury balances per asset.
+// Used for reconciliation and historical reporting.
+
+model TreasurySnapshot {
+  id                    BigInt   @id @default(autoincrement()) @map("id")
+  /// Date of the snapshot (YYYY-MM-DD).
+  snapshotDate          String   @map("snapshot_date")
+  /// Asset identifier (contract address or asset code).
+  asset                 String   @map("asset")
+  /// Expected balance from fee ledger + slashes - refunds (base-unit string).
+  expectedBalance       String   @map("expected_balance")
+  /// Actual on-chain balance (base-unit string).
+  actualBalance         String   @map("actual_balance")
+  /// Difference (actualBalance - expectedBalance, base-unit string).
+  discrepancy           String   @map("discrepancy")
+  /// Tolerance threshold used for this check (base-unit string).
+  toleranceThreshold    String   @map("tolerance_threshold")
+  /// Whether abs(discrepancy) > toleranceThreshold.
+  hasUnexplainedDiscrepancy Boolean @map("has_unexplained_discrepancy")
+  /// Human-readable explanation of differences (in-flight settlements, refunds, etc).
+  explanation           String?  @map("explanation")
+  /// ISO-8601 / TIMESTAMPTZ of when the snapshot was taken.
+  createdAt             DateTime @default(now()) @map("created_at") @db.Timestamptz
+  /// Breakdown of expected balance sources (fees, slashes, refunds).
+  breakdown             Json?    @map("breakdown")
+
+  @@unique([snapshotDate, asset], name: "snapshot_date_asset_unique")
+  @@index([snapshotDate])
+  @@index([hasUnexplainedDiscrepancy])
+  @@map("treasury_snapshots")
+}
+
+// ─── FeeLedger ───────────────────────────────────────────────────────────────
+// Append-only ledger of all fee accruals from filled intents.
+
+model FeeLedger {
+  id        BigInt   @id @default(autoincrement()) @map("id")
+  /// FK to intents.intent_id.
+  intentId  String   @map("intent_id")
+  /// Asset identifier (contract address or asset code).
+  asset     String   @map("asset")
+  /// Fee amount in base units (string).
+  amount    String   @map("amount")
+  /// ISO-8601 / TIMESTAMPTZ of when the fee was accrued.
+  accrualAt DateTime @default(now()) @map("accrual_at") @db.Timestamptz
+  /// Optional transaction hash.
+  txHash    String?  @map("tx_hash")
+
+  @@index([intentId])
+  @@index([asset, accrualAt])
+  @@map("fee_ledger")
+}
+
+// ─── SlashLedger ─────────────────────────────────────────────────────────────
+// Append-only ledger of all slash proceeds from solver penalties.
+
+model SlashLedger {
+  id          BigInt   @id @default(autoincrement()) @map("id")
+  /// Solver address that was slashed.
+  solverAddress String @map("solver_address")
+  /// Asset identifier (contract address or asset code).
+  asset       String   @map("asset")
+  /// Slashed amount in base units (string).
+  amount      String   @map("amount")
+  /// ISO-8601 / TIMESTAMPTZ of when the slash occurred.
+  slashedAt   DateTime @default(now()) @map("slashed_at") @db.Timestamptz
+  /// Reason for the slash.
+  reason      String   @map("reason")
+  /// Optional transaction hash.
+  txHash      String?  @map("tx_hash")
+
+  @@index([solverAddress])
+  @@index([asset, slashedAt])
+  @@map("slash_ledger")
+}
+
+// ─── RefundLedger ────────────────────────────────────────────────────────────
+// Append-only ledger of all refunds issued to users.
+
+model RefundLedger {
+  id         BigInt   @id @default(autoincrement()) @map("id")
+  /// FK to intents.intent_id.
+  intentId   String   @map("intent_id")
+  /// User address that received the refund.
+  userAddress String  @map("user_address")
+  /// Asset identifier (contract address or asset code).
+  asset      String   @map("asset")
+  /// Refund amount in base units (string).
+  amount     String   @map("amount")
+  /// ISO-8601 / TIMESTAMPTZ of when the refund was issued.
+  issuedAt   DateTime @default(now()) @map("issued_at") @db.Timestamptz
+  /// Reason for the refund.
+  reason     String   @map("reason")
+  /// Optional transaction hash.
+  txHash     String?  @map("tx_hash")
+
+  @@index([intentId])
+  @@index([userAddress])
+  @@index([asset, issuedAt])
+  @@map("refund_ledger")
 }
 
 // ─── AdminAuditLog ───────────────────────────────────────────────────────────

@@ -2,8 +2,15 @@ import { Body, Controller, Get, HttpCode, Param, Post, UseGuards } from "@nestjs
 import { ApiHeader, ApiOperation, ApiTags } from "@nestjs/swagger";
 import { AdminGuard, CurrentAdmin, RequireAdminRole } from "../admin/admin.guard";
 import { AdminPrincipal } from "../admin/admin-auth";
-import { KillSwitchReasonDto } from "../killswitch/killswitch.controller";
+import { IsString, MaxLength, MinLength } from "class-validator";
 import { GuardianService } from "./guardian.service";
+
+export class GuardianOverrideDto {
+  @IsString()
+  @MinLength(3)
+  @MaxLength(500)
+  reason!: string;
+}
 
 @ApiTags("governance")
 @Controller("api/v1/governance/guardian")
@@ -24,7 +31,7 @@ export class GuardianController {
   @ApiOperation({ summary: "Superadmin override of an active guardian action (audited)" })
   async override(
     @Param("id") id: string,
-    @Body() dto: KillSwitchReasonDto,
+    @Body() dto: GuardianOverrideDto,
     @CurrentAdmin() admin: AdminPrincipal,
   ) {
     return { overridden: await this.guardian.override(id, admin, dto.reason), status: this.guardian.status() };

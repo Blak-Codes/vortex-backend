@@ -3,34 +3,367 @@ name: CD
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      target:
+        description: "Which environment this manual run should deploy to"
+        type: choice
+        default: staging
+        options:
+          - staging
+          - production
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Supply-chain hardening (issue #467)
+#
+# The top-level default is the *floor*: read-only repository access. Nothing
+# here can mint a signature or an attestation. Only the `build` job grants
+# `id-token: write` / `attestations: write` / `packages: write`, and that job
+# is skipped for every `pull_request` event. A fork PR therefore never receives
+# the OIDC token cosign needs to sign in the upstream repository's identity, so
+# a fork cannot produce a signature that `cosign verify` would accept for
+# ghcr.io/stellar-vortex-protocol/vortex-backend.
+#
+# Every action in this file is pinned to a commit SHA. Dependabot
+# (.github/dependabot.yml, `package-ecosystem: github-actions`) keeps the pins
+# current; the `# vX.Y.Z` comment records which release each SHA is.
+# ─────────────────────────────────────────────────────────────────────────────
+permissions:
+  contents: read
+
+concurrency:
+  group: cd-${{ github.ref }}
+  # Never cancel a half-finished deploy. Superseded runs still verify
+  # independently, so cancelling one would only lose audit trail.
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  # The GitHub OIDC issuer every cosign certificate in this repo is chained to.
+  # `cosign verify` refuses anything not issued here.
+  COSIGN_ISSUER: https://token.actions.githubusercontent.com
+  # Keyless certificates carry the workflow ref as the subject. Accepting only
+  # the refs allowed to sign means a signature made from an attacker's branch
+  # in this repository still fails verification.
+  COSIGN_SUBJECT: "^https://github\.com/stellar-vortex-protocol/vortex-backend/(.github/workflows/cd\.yml@refs/heads/main|refs/tags/v[0-9].*)$"
 
 jobs:
+  # ── Build, SBOM, sign, attest ─────────────────────────────────────────────
+  build:
+    name: Build image, SBOM, sign, attest
+    # Never sign on a pull_request — see the permission note at the top.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      # Keyless cosign: exchanged for a short-lived OIDC token, never a stored
+      # key. This is the only reason `id-token: write` exists in this file.
+      id-token: write
+      # Required by actions/attest-* to publish to the GitHub attestation store.
+      attestations: write
+    outputs:
+      # The repository part only; consumers append `@<digest>`.
+      image: ${{ steps.ref.outputs.image }}
+      # Manifest digest of the pushed image. The signature and both
+      # attestations are bound to exactly this value.
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+
+      # A manual dispatch can be started from any ref, but COSIGN_SUBJECT only
+      # accepts main and v* tags. Without this guard the run would build, push
+      # and sign an image and then fail in `verify` on an unrecognised
+      # certificate identity, having already published the artefact. Fail in one
+      # second instead, before anything is pushed.
+      - name: Refuse to build a ref we are not permitted to sign
+        run: |
+          set -euo pipefail
+          case "$GITHUB_REF" in
+            refs/heads/main|refs/tags/v[0-9]*)
+              echo "Ref $GITHUB_REF is allowed to sign."
+              ;;
+            *)
+              echo "::error::Ref $GITHUB_REF cannot be signed. COSIGN_SUBJECT allows refs/heads/main and refs/tags/v<N>. Dispatch this workflow from main or from a v* tag."
+              exit 1
+              ;;
+          esac
+
+      - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
+
+      - name: Resolve the image reference
+        id: ref
+        run: echo "image=${REGISTRY}/${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to ${{ env.REGISTRY }}
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Built exactly once. The `digest` output is the single source of truth
+      # for the SBOM, the signature, both attestations, and every deploy step
+      # downstream — so "we deployed what we signed" is true by construction
+      # rather than by convention.
+      - name: Build and push the image
+        id: build
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          push: true
+          provenance: false
+          sbom: false
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:staging
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+      - name: Fail early if the push produced no digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [ -z "$DIGEST" ]; then
+            echo "::error::build-push-action reported no digest; refusing to sign nothing"
+            exit 1
+          fi
+          echo "image=${{ steps.ref.outputs.image }}@$DIGEST" >> "$GITHUB_OUTPUT"
+
+      # ── CycloneDX SBOM ──────────────────────────────────────────────────────
+      # `push-sbom` attaches the SBOM to the image itself as an OCI artifact, so
+      # it travels with the image no matter which registry the image is later
+      # mirrored to. The SPDX run exists because "attached to the image" and
+      # "attached to the release" are different audiences: a scanner pulling the
+      # image wants CycloneDX, a human reading the release wants SPDX.
+      - name: Generate CycloneDX SBOM and attach it to the image
+        uses: anchore/sbom-action@f8bdd1d8ac5e901a77a92f111440fdb1b593736b # v0.20.6
+        with:
+          image: ${{ steps.ref.outputs.image }}@${{ steps.build.outputs.digest }}
+          format: cyclonedx-json
+          output-file: sbom.cdx.json
+          push-sbom: true
+          upload-artifact: false
+
+      - name: Generate SPDX SBOM for the release
+        uses: anchore/sbom-action@f8bdd1d8ac5e901a77a92f111440fdb1b593736b # v0.20.6
+        with:
+          image: ${{ steps.ref.outputs.image }}@${{ steps.build.outputs.digest }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+          upload-artifact: false
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
+
+      - name: cosign sign (keyless)
+        env:
+          IMAGE: ${{ steps.ref.outputs.image }}@${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # `--yes` because the OIDC consent prompt is interactive; the token
+          # exchange itself is non-interactive in Actions.
+          cosign sign --yes "$IMAGE"
+
+      # ── Attestations ────────────────────────────────────────────────────────
+      # Two separate attestations because they answer two different questions:
+      #   provenance → "which workflow/commit/source produced these bytes"
+      #   sbom       → "what is inside these bytes"
+      # Both are bound to the digest, so neither can be replayed onto a
+      # different build.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-name: ${{ steps.ref.outputs.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      # `sbom-path` is a *required* input on actions/attest-sbom v2.4.0, and the
+      # file here is not named `sbom.json`, so it has to be stated explicitly.
+      #
+      # There is deliberately no `predicate-type` input: v2.4.0 does not accept
+      # one. The action derives the predicate type from the SBOM's own
+      # `bomFormat` field via its predicate submodule, and a CycloneDX document
+      # yields `https://cyclonedx.org/bom` — which is exactly what the
+      # `cosign verify-attestation --type` step below asserts.
+      - name: Attest the SBOM
+        uses: actions/attest-sbom@bd218ad0dbcb3e146bd073d1d9c6d78e08aa8a0b # v2.4.0
+        with:
+          subject-name: ${{ steps.ref.outputs.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          sbom-path: sbom.cdx.json
+          push-to-registry: true
+
+      - name: Upload the SBOMs for the release job
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sbom-${{ github.sha }}
+          path: |
+            sbom.cdx.json
+            sbom.spdx.json
+          if-no-files-found: error
+          retention-days: 90
+
+  # ── Verify before anything is deployed (issue #467) ─────────────────────────
+  # The issue's "testing" criterion, in the only form that means anything: the
+  # signature and both attestations are re-verified from a clean runner that
+  # shares no state with the signer. A build that cannot verify itself does not
+  # reach staging, let alone production.
+  verify:
+    name: Verify signature and attestations
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Reading the public attestation store needs no extra scope, but cosign's
+      # identity flow does exchange a token, so id-token is granted here too.
+      id-token: write
+    steps:
+      - uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
+
+      - name: cosign verify (signature)
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}@${{ needs.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cosign verify \
+            --certificate-oidc-issuer "$COSIGN_ISSUER" \
+            --certificate-identity-regexp "$COSIGN_SUBJECT" \
+            "$IMAGE"
+
+      - name: cosign verify-attestation (SLSA provenance)
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}@${{ needs.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cosign verify-attestation \
+            --certificate-oidc-issuer "$COSIGN_ISSUER" \
+            --certificate-identity-regexp "$COSIGN_SUBJECT" \
+            --type slsaprovenance \
+            "$IMAGE"
+
+      - name: cosign verify-attestation (CycloneDX SBOM)
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}@${{ needs.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cosign verify-attestation \
+            --certificate-oidc-issuer "$COSIGN_ISSUER" \
+            --certificate-identity-regexp "$COSIGN_SUBJECT" \
+            --type "https://cyclonedx.org/bom" \
+            "$IMAGE"
+
+      - name: Check the SBOMs are well-formed and describe the deployed digest
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: sbom-${{ github.sha }}
+          path: sboms
+
+      - name: Validate the SBOM contents
+        env:
+          DIGEST: ${{ needs.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # "An SBOM was produced" is a weak claim — the useful one is "the SBOM
+          # is a valid CycloneDX/SPDX document that describes the exact manifest
+          # we are about to deploy". Node is already on the runner, so this
+          # needs no extra tooling.
+          node <<'NODE'
+          const fs = require("node:fs");
+          const digest = process.env.DIGEST;
+
+          const cdx = JSON.parse(fs.readFileSync("sboms/sbom.cdx.json", "utf8"));
+          if (cdx.bomFormat !== "CycloneDX") throw new Error(`expected CycloneDX, got ${cdx.bomFormat}`);
+          if (!Array.isArray(cdx.components) || cdx.components.length === 0) {
+            throw new Error("CycloneDX SBOM lists no components");
+          }
+          if (!JSON.stringify(cdx).includes(digest)) {
+            throw new Error("CycloneDX SBOM does not reference the deployed digest");
+          }
+
+          const spdx = JSON.parse(fs.readFileSync("sboms/sbom.spdx.json", "utf8"));
+          if (spdx.spdxVersion !== "SPDX-2.3") throw new Error(`expected SPDX-2.3, got ${spdx.spdxVersion}`);
+          if (!Array.isArray(spdx.packages) || spdx.packages.length === 0) {
+            throw new Error("SPDX SBOM lists no packages");
+          }
+
+          console.log(
+            `SBOMs validated: ${cdx.components.length} CycloneDX components, ` +
+              `${spdx.packages.length} SPDX packages, all referencing ${digest}`,
+          );
+          NODE
+
+  # ── Attach the SBOMs to the GitHub release (tag builds only) ───────────────
+  release:
+    name: Attach SBOMs to the release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: sbom-${{ github.sha }}
+          path: sboms
+
+      - name: Upload the SBOMs to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --verify-tag --generate-notes
+          fi
+          gh release upload "$TAG" \
+            sboms/sbom.cdx.json \
+            sboms/sbom.spdx.json \
+            --clobber
+
   staging:
     name: Deploy to staging
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [build, verify]
+    # Runs for a manual `target: staging` dispatch as well as for a push to main.
+    #
+    # It also has to run for `target: production`: `production` needs this job,
+    # and a job whose dependency was skipped is itself skipped. Gating staging on
+    # `push` only (as an earlier revision of this file did) meant production was
+    # unreachable on every run — the manual dispatch skipped staging, so
+    # production was skipped in turn. Re-running the smoke test against the same
+    # digest immediately before production is also the stronger guarantee: the
+    # exact bytes about to go out are the bytes that just started cleanly.
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     environment: staging
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
 
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build staging image
-        run: cp .env.testnet.example .env && docker build -t vortex-backend:staging .
+      # Deploy by digest, never by tag. The tag is a convenience label; the
+      # digest is what the signature covers, so deploying the digest is what
+      # makes "we deployed what we signed" true.
+      - name: Pull the verified image by digest
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}@${{ needs.build.outputs.digest }}
+        run: docker pull "$IMAGE"
 
       - name: Run staging smoke test
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}@${{ needs.build.outputs.digest }}
         run: |
+          set -euo pipefail
+          cp .env.testnet.example .env
           docker run -d --rm --name vortex-backend-staging \
             -p 4000:4000 \
             --env-file .env \
             -e NODE_ENV=staging \
-            vortex-backend:staging
+            "$IMAGE"
 
           for attempt in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:4000/health; then
@@ -44,11 +377,38 @@ jobs:
 
   production:
     name: Deploy to production
-    needs: staging
-    if: github.event_name == 'workflow_dispatch'
+    needs: [staging, verify]
+    # Manual only, and only when staging ran in this same run and passed — see
+    # the note on the `staging` job above for why that ordering matters.
+    if: github.event_name == 'workflow_dispatch' && inputs.target == 'production'
     runs-on: ubuntu-latest
     environment: production
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - name: Build production image
-        run: docker build -t vortex-backend:production .
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+      - uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
+
+      # The policy-controller / Kyverno arm of the issue's acceptance criteria
+      # is the right long-term home for this check: a cluster-admission policy
+      # rejects unsigned images even from someone with `kubectl apply` access,
+      # which a pre-deploy step in this workflow cannot. This step is the
+      # portable half — it needs no cluster, so it protects the deploy this
+      # workflow performs. The cluster-side policy is the documented follow-up.
+      - name: Re-verify the signature immediately before deploying
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}@${{ needs.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cosign verify \
+            --certificate-oidc-issuer "$COSIGN_ISSUER" \
+            --certificate-identity-regexp "$COSIGN_SUBJECT" \
+            "$IMAGE"
+
+      - name: Pull the verified image by digest
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}@${{ needs.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker pull "$IMAGE"
+          docker tag "$IMAGE" vortex-backend:production

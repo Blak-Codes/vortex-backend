@@ -2,7 +2,7 @@ import { ConflictException, Inject, Injectable, Logger, Optional } from "@nestjs
 import { SupportedChain } from "../intents/intents.types";
 import { SOLVERS_REPOSITORY, ISolversRepository } from "./solvers.repository";
 import { SolverRecord, SolverPendingPenalty } from "./solvers.types";
-import { KillSwitchService } from "../killswitch/killswitch.service";
+import { GuardianStateService } from "../governance/guardian-state.service";
 
 export type LeaderboardWindow = "24h" | "7d" | "30d" | "all";
 
@@ -23,6 +23,16 @@ export interface SlashRecord {
 }
 
 /**
+ * The subset of {@link SolverRecord} a solver is allowed to change about
+ * itself. Every other field (address, bond, fill counters, volume,
+ * registeredAt, isActive) is immutable and is never accepted here.
+ */
+export type MutableSolverProfile = Pick<
+  SolverRecord,
+  "name" | "supportedChains" | "supportedTokens" | "avgFillTime"
+>;
+
+/**
  * Orchestration layer for solver records.
  *
  * Business logic (counter initialisation, timestamp generation) lives here.
@@ -40,7 +50,7 @@ export class SolversService {
   constructor(
     @Inject(SOLVERS_REPOSITORY)
     private readonly repo: ISolversRepository,
-    @Optional() private readonly killSwitch?: KillSwitchService,
+    @Optional() private readonly guardian?: GuardianStateService,
   ) {}
 
   /**
@@ -48,7 +58,7 @@ export class SolversService {
    * Derived from guardian state; operators cannot clear it by reactivating.
    */
   isSuspended(address: string): boolean {
-    return this.killSwitch?.isSolverSuspended(address) ?? false;
+    return this.guardian?.isSolverSuspended(address) ?? false;
   }
 
   async getAll(): Promise<SolverRecord[]> {
@@ -57,6 +67,37 @@ export class SolversService {
 
   async get(address: string): Promise<SolverRecord | undefined> {
     return this.repo.findByAddress(address);
+  }
+
+  /**
+   * Apply a partial patch to a solver's *mutable* profile fields (issue #273).
+   *
+   * Array fields (`supportedChains`, `supportedTokens`) are replaced wholesale
+   * rather than merged — the API is a PATCH over a full replacement list, and
+   * a merge would make it impossible to drop a chain.
+   *
+   * Keys whose value is `undefined` are skipped, so a caller that spreads a
+   * partially-populated DTO cannot accidentally blank out an existing value.
+   * Immutable fields are structurally impossible to set: the patch type only
+   * admits {@link MutableSolverProfile}.
+   *
+   * @returns the updated record, or `undefined` when no solver has that address.
+   */
+  async update(
+    address: string,
+    patch: Partial<MutableSolverProfile>,
+  ): Promise<SolverRecord | undefined> {
+    const solver = await this.repo.findByAddress(address);
+    if (!solver) return undefined;
+
+    const applied: Partial<MutableSolverProfile> = {};
+    if (patch.name !== undefined) applied.name = patch.name;
+    if (patch.avgFillTime !== undefined) applied.avgFillTime = patch.avgFillTime;
+    if (patch.supportedChains !== undefined) applied.supportedChains = patch.supportedChains;
+    if (patch.supportedTokens !== undefined) applied.supportedTokens = patch.supportedTokens;
+
+    const updated: SolverRecord = { ...solver, ...applied };
+    return this.repo.save(updated);
   }
 
   async register(
@@ -112,6 +153,115 @@ export class SolversService {
     const solver = await this.repo.findByAddress(address);
     if (!solver) return null;
     const updated = { ...solver, isActive: true };
+    return this.repo.save(updated);
+  }
+
+  /**
+   * Register a solver from an on-chain SolverRegistered event (issue #399).
+   *
+   * Creates a new solver record with source="chain" and the bond amount
+   * observed on-chain.  Fields not present in the event (name, supported
+   * chains/tokens) are set to sensible defaults and can be updated later via
+   * POST /solvers metadata update.
+   */
+  async registerFromChain(params: {
+    address: string;
+    bondAmount: string;
+    name: string;
+    isActive: boolean;
+    supportedChains: SolverRecord["supportedChains"];
+    supportedTokens: SolverRecord["supportedTokens"];
+    chainUpdatedLedger: number;
+  }): Promise<SolverRecord> {
+    const now = Math.floor(Date.now() / 1000);
+    const solver: SolverRecord = {
+      address: params.address,
+      name: params.name,
+      bondAmount: params.bondAmount,
+      fillsCompleted: 0,
+      fillsFailed: 0,
+      totalVolume: "0",
+      avgFillTime: 0,
+      isActive: params.isActive,
+      registeredAt: now,
+      lastActiveAt: now,
+      supportedChains: params.supportedChains,
+      supportedTokens: params.supportedTokens,
+      source: "chain",
+      chainUpdatedLedger: params.chainUpdatedLedger,
+    };
+    return this.repo.save(solver);
+  }
+
+  /**
+   * Apply a partial update from an on-chain event projection (issue #399).
+   *
+   * Only the fields present in `update` are changed — all other fields remain
+   * as stored.  Guards on chainUpdatedLedger are enforced by the caller
+   * (SolverRegistryEventsService) before this method is called.
+   *
+   * This is the write path for all chain-sourced projections (BondDeposited,
+   * BondWithdrawn, SolverDeactivated, etc.).
+   */
+  async applyChainUpdate(
+    address: string,
+    update: Partial<Pick<SolverRecord, "bondAmount" | "isActive" | "source" | "chainUpdatedLedger">>,
+  ): Promise<SolverRecord | null> {
+    const solver = await this.repo.findByAddress(address);
+    if (!solver) return null;
+    const updated: SolverRecord = { ...solver, ...update, lastActiveAt: Math.floor(Date.now() / 1000) };
+    return this.repo.save(updated);
+  }
+
+  /**
+   * Records that a solver successfully filled an intent.
+   * Increments fillsCompleted and updates lastActiveAt.
+   */
+  async recordSuccessfulFill(address: string): Promise<SolverRecord | null> {
+    const solver = await this.repo.findByAddress(address);
+    if (!solver) return null;
+    const updated = {
+      ...solver,
+      fillsCompleted: solver.fillsCompleted + 1,
+      lastActiveAt: Math.floor(Date.now() / 1000),
+   * Records a successful fill for `address`.
+   *
+   * Bumps `fillsCompleted`, adds `fillAmount` to the cumulative `totalVolume`,
+   * and refreshes `lastActiveAt` so liveness checks reflect the fill. All
+   * arithmetic stays in bigint so a large fill cannot lose precision; the
+   * rolling `avgFillTime` is intentionally left alone because only the
+   * controller has the accept→fill elapsed time and passing it through on
+   * every fill is not currently wired up.
+   *
+   * @param address    Solver address.
+   * @param fillAmount Fill amount in the destination token's base units. When
+   *                   omitted, volume is left unchanged (counters still move).
+   * @returns the updated record, or `null` when the solver is unknown.
+   */
+  async recordSuccessfulFill(address: string, fillAmount?: string): Promise<SolverRecord | null> {
+    const solver = await this.repo.findByAddress(address);
+    if (!solver) return null;
+
+    const now = Math.floor(Date.now() / 1000);
+    let totalVolume = solver.totalVolume;
+    if (fillAmount !== undefined) {
+      try {
+        totalVolume = (BigInt(solver.totalVolume) + BigInt(fillAmount)).toString();
+      } catch {
+        // A malformed amount must not lose the fill counter — log and keep
+        // the existing volume rather than throwing inside a request path.
+        this.logger.error(
+          `[volume] ignoring non-integer fillAmount="${fillAmount}" for solver=${address}`,
+        );
+      }
+    }
+
+    const updated: SolverRecord = {
+      ...solver,
+      fillsCompleted: solver.fillsCompleted + 1,
+      totalVolume,
+      lastActiveAt: now,
+    };
     return this.repo.save(updated);
   }
 

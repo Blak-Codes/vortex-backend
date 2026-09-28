@@ -146,6 +146,71 @@ The `@stellar/stellar-sdk` is mocked globally in e2e tests via Jest's
 `moduleNameMapper` (see `test/jest-e2e.json`) so Soroban calls never hit
 the network.
 
+### Sharding, flakes and quarantine
+
+CI does not run `npm test` directly. The suite is split across parallel
+runners by `scripts/ci/run-tests.mjs`, and you can reproduce a single shard
+locally with the same command:
+
+```bash
+npm run test:ci                       # unit suite, whole
+npm run test:ci -- --shard=1/4        # unit suite, one of four shards
+npm run test:e2e:ci -- --shard=1/2    # e2e suite, one of two shards
+```
+
+`run-tests.mjs` does three things beyond invoking Jest:
+
+1. Applies [`test/quarantine.json`](./test/quarantine.json), skipping the
+   listed files and printing what it skipped.
+2. Writes a machine-readable result file so a failure can be classified
+   instead of guessed at.
+3. If a run fails, re-runs **only the failing files once** and diffs the two
+   runs. A test that passes on the retry is reported as a flake and the job
+   still goes green, with a `::warning` annotation and a
+   `flake-report.md` in the job summary. Anything that fails twice, or a test
+   file that cannot even load, fails the job — a module-load error is never
+   retried, because retrying cannot fix it.
+
+Coverage is collected per shard but **not** gated per shard: a shard that runs
+a quarter of the suite cannot meet a global threshold. Shards write to
+`coverage-shards/`, and `scripts/ci/coverage-merge.mjs` sums the counters,
+writes `coverage/`, and enforces the 70 % threshold from `jest.config.js` on
+the merged result. Threshold changes therefore stay in one place.
+
+#### Quarantining a flaky test
+
+Quarantine is a debt record, not a silencer. Adding an entry to
+`test/quarantine.json` requires all of:
+
+| Field | Rule |
+|-------|------|
+| `path` | Repo-relative, must exist, no duplicates |
+| `reason` | What actually goes wrong, not "flaky" |
+| `owner` | A GitHub handle — `@you` |
+| `issue` | `#123` or the issue URL tracking the fix |
+| `addedAt` | ISO date the entry was added |
+
+`scripts/ci/check-quarantine.mjs` fails the build on a missing owner or issue,
+a path that no longer exists, a duplicate, or an entry older than
+`staleAfterDays` (90 by default). It is plain Node with no imports, so it also
+works as a pre-commit hook without `npm ci`.
+
+**Prefer fixing the test.** Quarantine only when the flake is genuinely
+environmental (timing, a shared fixture, upstream RPC). Before opening a PR
+that adds an entry, expect a maintainer to ask why the test cannot be made
+deterministic.
+
+### Required status checks
+
+`Backend (Nest) – Node 20` and `Backend (Nest) – Node 22` (note the en dash —
+branch protection matches the check name exactly) cover lint,
+type-check and build only. The test gates are separate checks —
+`Unit tests (shard n/4)`, `E2E tests (shard n/2)` and `Coverage merge and gate`
+— so a red unit test cannot hide behind a green build job. If you change the
+shard counts in `.github/workflows/ci.yml`, update `--expect-shards` in the
+`coverage` job in the same commit; the merge job fails loudly on a mismatch
+rather than silently gating on a partial union.
+
 ---
 
 ## Code conventions

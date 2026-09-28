@@ -6,15 +6,39 @@ import { AppConfig } from "../config/configuration";
 @Injectable()
 export class MetricsService implements OnModuleInit {
   private readonly register: client.Registry;
+
+  // ── HTTP ───────────────────────────────────────────────────────────────────
   public readonly httpRequestDuration: client.Histogram<string>;
   public readonly httpRequestTotal: client.Counter<string>;
   public readonly httpRequestErrors: client.Counter<string>;
+
+  // ── Intent / WS general ───────────────────────────────────────────────────
   public readonly intentStateTransitions: client.Counter<string>;
   public readonly wsConnections: client.Gauge<string>;
   public readonly intentCreateDuration: client.Histogram<string>;
   public readonly wsDeliveryDuration: client.Histogram<string>;
   public readonly eventIngestionLag: client.Gauge<string>;
-  public readonly txConfirmationDuration: client.Histogram<string>;
+
+  /**
+   * Shadow-mode divergence monitor (issue #401).
+   *
+   * `vortex_shadow_comparisons_total{transition,outcome}` counts every
+   * (expected, simulated) pair the monitor resolved, and
+   * `vortex_shadow_divergences_total{transition,reason}` counts the subset the
+   * classifier flagged. `vortex_shadow_dropped_total` and
+   * `vortex_shadow_queue_depth` expose monitor health so a starved monitor is
+   * never mistaken for a healthy one — the on-chain cutover runbook's go/no-go
+   * threshold is only meaningful while these are being exercised.
+   */
+  public readonly shadowComparisons: client.Counter<string>;
+  public readonly shadowDivergences: client.Counter<string>;
+  public readonly shadowDropped: client.Counter<string>;
+  public readonly shadowQueueDepth: client.Gauge<string>;
+   * Leader election metrics (issue #493).
+   * Track which replica is leader per worker and how often leadership changes.
+   */
+  public readonly leaderElectionIsLeader: client.Gauge<string>;
+  public readonly leaderElectionChangesTotal: client.Counter<string>;
 
   /** Background job metrics (issue #494). */
   public readonly jobsQueueDepth: client.Gauge<string>;
@@ -35,6 +59,31 @@ export class MetricsService implements OnModuleInit {
    */
   public readonly sweeperExpiredTotal: client.Counter<string>;
   public readonly sweeperSweepDurationMs: client.Histogram<string>;
+
+  // ── SLO SLIs (issue #480) ─────────────────────────────────────────────────
+  public readonly txConfirmationDuration: client.Histogram<string>;
+
+  // ── WS capability-filter metrics (issue #436) ────────────────────────────
+  /**
+   * WS events delivered to an authenticated solver after capability filtering.
+   * Label `solver` is truncated to 12 chars to bound Prometheus label cardinality.
+   */
+  public readonly wsEventsDeliveredTotal: client.Counter<string>;
+  /**
+   * WS events suppressed by the capability filter (intent outside solver's
+   * supported chains/tokens or solver bond = 0).
+   */
+  public readonly wsEventsFilteredTotal: client.Counter<string>;
+
+  // ── Restore-transaction metrics (issue #394) ─────────────────────────────
+  public readonly sorobanRestoreTotal: client.Counter<string>;
+  public readonly sorobanRestoreFeeStroops: client.Histogram<string>;
+
+  // ── Remote signer call latency (issue #400) ───────────────────────────────
+  public readonly signerCallDurationSeconds: client.Histogram<string>;
+
+  // ── Solver-registry event ingestion (issue #399) ──────────────────────────
+  public readonly solverRegistryEventsTotal: client.Counter<string>;
 
   constructor(private readonly configService: ConfigService<AppConfig, true>) {
     this.register = new client.Registry();
@@ -76,11 +125,6 @@ export class MetricsService implements OnModuleInit {
     });
 
     // ── Sweeper metrics (issue #259) ─────────────────────────────────────────
-    // These replace the retired MetricsRegistry.sweeper namespace from
-    // src/common/metrics.ts. They are Prometheus-backed so they appear in
-    // GET /metrics and in any Prometheus/Grafana dashboards without further
-    // adaptation.
-
     this.sweeperExpiredTotal = new client.Counter({
       name: `${prefix}sweeper_expired_total`,
       help: "Total number of intents expired across all sweeps",
@@ -120,6 +164,89 @@ export class MetricsService implements OnModuleInit {
       name: `${prefix}tx_confirmation_duration_seconds`,
       help: "Fill submission to on-chain confirmation latency in seconds",
       buckets: [1, 5, 15, 30, 60, 120, 300],
+      registers: [this.register],
+    });
+
+    // ── WS capability-filter metrics (issue #436) ──────────────────────────
+    this.wsEventsDeliveredTotal = new client.Counter({
+      name: `${prefix}ws_events_delivered_total`,
+      help: "WS events delivered to authenticated solvers after capability filtering",
+      labelNames: ["solver"],
+      registers: [this.register],
+    });
+
+    this.wsEventsFilteredTotal = new client.Counter({
+      name: `${prefix}ws_events_filtered_total`,
+      help: "WS events suppressed by capability filter (intent outside solver's chains/tokens)",
+      labelNames: ["solver"],
+      registers: [this.register],
+    });
+
+    // ── Restore-transaction metrics (issue #394) ───────────────────────────
+    this.sorobanRestoreTotal = new client.Counter({
+      name: `${prefix}soroban_restore_total`,
+      help: "Total RestoreFootprint transactions submitted",
+      labelNames: ["result"],
+      registers: [this.register],
+    });
+
+    this.sorobanRestoreFeeStroops = new client.Histogram({
+      name: `${prefix}soroban_restore_fee_stroops`,
+      help: "Fee paid for RestoreFootprint transactions in stroops",
+      buckets: [1000, 5000, 10000, 50000, 100000, 500000, 1000000],
+      registers: [this.register],
+    });
+
+    // ── Remote signer latency (issue #400) ────────────────────────────────
+    this.signerCallDurationSeconds = new client.Histogram({
+      name: `${prefix}signer_call_duration_seconds`,
+      help: "Remote signer call latency in seconds",
+      labelNames: ["backend", "operation"],
+      buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],
+      registers: [this.register],
+    });
+
+    // ── Solver-registry event ingestion (issue #399) ──────────────────────
+    this.solverRegistryEventsTotal = new client.Counter({
+      name: `${prefix}solver_registry_events_total`,
+      help: "Solver-registry contract events ingested by type",
+      labelNames: ["event_type"],
+    // ── Shadow-mode divergence monitor (issue #401) ──────────────────────────
+    this.shadowComparisons = new client.Counter({
+      name: `${prefix}shadow_comparisons_total`,
+      help: "Shadow-mode (expected, simulated) outcome pairs resolved, by transition, expected outcome and simulated outcome",
+      labelNames: ["transition", "expected", "outcome"],
+      registers: [this.register],
+    });
+
+    this.shadowDivergences = new client.Counter({
+      name: `${prefix}shadow_divergences_total`,
+      help: "Shadow-mode divergences between the off-chain and simulated on-chain outcome, by transition and reason",
+      labelNames: ["transition", "reason"],
+      registers: [this.register],
+    });
+
+    this.shadowDropped = new client.Counter({
+      name: `${prefix}shadow_dropped_total`,
+      help: "Shadow-mode observations dropped because the bounded queue was full",
+      registers: [this.register],
+    });
+
+    this.shadowQueueDepth = new client.Gauge({
+      name: `${prefix}shadow_queue_depth`,
+      help: "Current number of queued shadow-mode observations awaiting simulation",
+    // ── Leader election metrics (issue #493) ─────────────────────────────────
+    this.leaderElectionIsLeader = new client.Gauge({
+      name: `${prefix}leader_election_is_leader`,
+      help: "1 when this replica is the current leader for the named worker, 0 otherwise",
+      labelNames: ["worker"],
+      registers: [this.register],
+    });
+
+    this.leaderElectionChangesTotal = new client.Counter({
+      name: `${prefix}leader_election_changes_total`,
+      help: "Total number of leadership transitions (acquisitions + losses) per worker",
+      labelNames: ["worker", "transition"],
       registers: [this.register],
     });
 
@@ -238,5 +365,85 @@ export class MetricsService implements OnModuleInit {
   /** Observe fill-to-confirmation latency in seconds (SLO SLI, issue #480). */
   observeTxConfirmation(durationSeconds: number): void {
     this.txConfirmationDuration.observe(durationSeconds);
+  }
+
+  // ── WS capability-filter helpers (issue #436) ────────────────────────────
+
+  /** Record a WS event delivered to an authenticated solver (post-filter). */
+  incWsDelivered(solverAddress: string): void {
+    this.wsEventsDeliveredTotal.inc({ solver: solverAddress.slice(0, 12) });
+  }
+
+  /** Record a WS event suppressed for a solver by the capability filter. */
+  incWsFiltered(solverAddress: string): void {
+    this.wsEventsFilteredTotal.inc({ solver: solverAddress.slice(0, 12) });
+  }
+
+  // ── Restore-transaction helpers (issue #394) ──────────────────────────────
+
+  incSorobanRestore(result: "success" | "failed"): void {
+    this.sorobanRestoreTotal.inc({ result });
+  }
+
+  observeRestoreFee(stroops: number): void {
+    this.sorobanRestoreFeeStroops.observe(stroops);
+  }
+
+  // ── Remote signer helpers (issue #400) ────────────────────────────────────
+
+  observeSignerCall(backend: string, operation: string, durationSeconds: number): void {
+    this.signerCallDurationSeconds.observe({ backend, operation }, durationSeconds);
+  }
+
+  // ── Solver-registry event ingestion helpers (issue #399) ─────────────────
+
+  incSolverRegistryEvent(eventType: string): void {
+    this.solverRegistryEventsTotal.inc({ event_type: eventType });
+  /**
+   * Record one resolved shadow-mode comparison (issue #401).
+   *
+   * `expected` is the off-chain verdict and `outcome` the simulated one, so
+   * the pair required by the issue stays queryable from PromQL:
+   * `...{expected="ok",outcome="rejected"}` is the "contract would have
+   * refused a transition we committed" case, and the reverse label pair is the
+   * "we refused something the contract allows" case. Cardinality is bounded at
+   * 5 transitions x 2 expected x 4 outcomes.
+   *
+   * `outcome` is `"unavailable"` when the simulation never produced a verdict
+   * (unconfigured contract, RPC unreachable) so that case stays
+   * distinguishable in PromQL from a contract that actively said no.
+   */
+  recordShadowComparison(transition: string, expected: string, outcome: string): void {
+    this.shadowComparisons.inc({ transition, expected, outcome });
+  }
+
+  /** Record one classified shadow-mode divergence (issue #401). */
+  recordShadowDivergence(transition: string, reason: string): void {
+    this.shadowDivergences.inc({ transition, reason });
+  }
+
+  /** Record one shadow-mode observation dropped by the bounded queue. */
+  recordShadowDrop(): void {
+    this.shadowDropped.inc();
+  }
+
+  /** Publish the current shadow queue depth. */
+  setShadowQueueDepth(depth: number): void {
+    this.shadowQueueDepth.set(depth);
+   * Record that this replica acquired leadership for `workerName`.
+   * Sets the is_leader gauge to 1 and increments the acquisition counter.
+   */
+  recordLeadershipAcquired(workerName: string): void {
+    this.leaderElectionIsLeader.set({ worker: workerName }, 1);
+    this.leaderElectionChangesTotal.inc({ worker: workerName, transition: "acquired" });
+  }
+
+  /**
+   * Record that this replica lost leadership for `workerName`.
+   * Sets the is_leader gauge to 0 and increments the lost counter.
+   */
+  recordLeadershipLost(workerName: string): void {
+    this.leaderElectionIsLeader.set({ worker: workerName }, 0);
+    this.leaderElectionChangesTotal.inc({ worker: workerName, transition: "lost" });
   }
 }

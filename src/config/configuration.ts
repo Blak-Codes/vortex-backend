@@ -74,6 +74,27 @@ export const CHAIN_FILL_WINDOW_DEFAULTS: Record<string, number> = {
 /** Fallback fill-window when chain is not in the map. */
 export const DEFAULT_FILL_WINDOW_SECONDS = 600;
 
+/**
+ * Stellar network passphrases keyed by the `STELLAR_NETWORK` values the schema
+ * accepts.
+ *
+ * A transaction envelope is only valid for the network it was built for, so
+ * anything that assembles an envelope — today only the shadow-mode
+ * simulation path in `StellarTxService.simulateContract` — needs this map.
+ * It lives next to the other network-derived constants rather than in the
+ * service so there is exactly one place to look when a network is added.
+ *
+ * Lookups fall back to testnet (see `StellarTxService`'s constructor): the
+ * worst outcome for a *simulated* envelope is a simulation against the wrong
+ * network, which surfaces immediately as a divergence rather than as a silent
+ * wrong-network write, because simulation never broadcasts.
+ */
+export const NETWORK_PASSPHRASES: Record<AppConfig["stellar"]["network"], string> = {
+  testnet: "Test SDF Network ; September 2015",
+  futurenet: "Test SDF Future Network ; October 2022",
+  mainnet: "Public Global Stellar Network ; September 2015",
+};
+
 export interface AppConfig {
   nodeEnv: string;
   port: number;
@@ -81,6 +102,7 @@ export interface AppConfig {
   stellar: {
     network: "testnet" | "futurenet" | "mainnet";
     sorobanRpcUrl: string;
+    horizonUrl: string;
     settlementContractId: string;
     solverRegistryContractId: string;
     signerSecretKey: string;
@@ -91,6 +113,9 @@ export interface AppConfig {
     signingKey: string;
     /** Fee percentile to use when estimating Soroban inclusion fees. */
     feePercentile: FeePercentile;
+  };
+  treasury: {
+    address: string;
   };
   onchainIntentsEnabled: boolean;
   intentRetentionDays: number;
@@ -113,6 +138,82 @@ export interface AppConfig {
   wsMaxConnections: number;
   wsBackplane: "memory" | "redis";
   redisUrl: string;
+
+  // ── Resource-exhaustion limits (issue #476) ───────────────────────────────
+  /** Maximum JSON nesting depth accepted by the body parser middleware. */
+  jsonMaxDepth: number;
+  /** Maximum chain-filter values in a single WS subscribe message. */
+  wsMaxFilterChains: number;
+  /** Maximum concurrent active subscriptions per WS connection. */
+  wsMaxSubscriptions: number;
+  /** Default Postgres statement_timeout (ms) for standard route queries. */
+  dbQueryTimeoutMs: number;
+  /** Postgres statement_timeout (ms) for batch-lookup queries. */
+  dbBatchQueryTimeoutMs: number;
+  /** Postgres statement_timeout (ms) for stats/aggregate queries. */
+  dbStatsQueryTimeoutMs: number;
+
+  // ── Emergency kill-switch (issue #477) ─────────────────────────────────────
+  killswitch: {
+    /**
+     * Shared secret for the operator control plane (`/api/v1/ops/killswitch`).
+     * Empty disables those routes entirely — the control plane is never open.
+     */
+    operatorToken: string;
+    /**
+     * Redis URL used for cross-replica pause propagation. Empty falls back to
+     * database polling only, which still meets the propagation budget.
+     */
+    redisUrl: string;
+    /**
+     * Interval (ms) for the `max_updated_at` probe that backstops Redis pub/sub.
+     * Worst-case propagation delay is roughly this value, so it must stay
+     * comfortably under the 5 s propagation requirement.
+     */
+    pollMs: number;
+  /**
+   * Shadow-mode divergence monitor (issue #401).
+   *
+   * Runs read-only on-chain simulations of every intent state transition in
+   * parallel with the authoritative off-chain path and reports where the two
+   * disagree. See docs/runbooks/onchain-cutover.md for the go/no-go threshold.
+   */
+  shadow: {
+    /** Master switch. When false, `ShadowService.observe` is a no-op. */
+    enabled: boolean;
+    /** Fraction of transitions to simulate, in `[0, 1]`. `1` = every one. */
+    sampleRate: number;
+    /** Hard cap on queued observations; beyond this they are dropped + counted. */
+    queueMax: number;
+    /** How many observations the background drain simulates concurrently. */
+    concurrency: number;
+    /**
+     * Public key used as the source account for simulation envelopes.
+     *
+     * Never signed, never submitted, never charged — it only has to be a valid
+     * StrKey. Empty means "simulate nothing", which the monitor reports as
+     * `contract_unconfigured` rather than as zero divergence.
+     */
+    sourceAccount: string;
+  governance: {
+    /**
+     * On-chain governance / parameters contract ID.
+     * When set, ProtocolParamsService reads current + scheduled parameters
+     * from this contract and exposes them via GET /api/v1/params.
+     * Leave blank to use code / env defaults only.
+     */
+    paramsContractId: string;
+    /**
+     * How often (in milliseconds) to poll the parameters contract for changes.
+     * Default: 30 000 ms (30 s).
+     */
+    paramsPollIntervalMs: number;
+  leaderElection: {
+    /** When false, all workers run unconditionally (pre-election behaviour). */
+    enabled: boolean;
+    /** Heartbeat interval in ms (default 5000). */
+    heartbeatMs: number;
+  };
   /**
    * Process role (issue #494). Producers may enqueue jobs from any role;
    * queue workers only run when the role is "worker" or "all".
@@ -149,11 +250,15 @@ export default (): AppConfig => ({
   stellar: {
     network: (process.env.STELLAR_NETWORK ?? "testnet") as AppConfig["stellar"]["network"],
     sorobanRpcUrl: process.env.SOROBAN_RPC_URL ?? "https://soroban-testnet.stellar.org",
+    horizonUrl: process.env.HORIZON_URL ?? "https://horizon-testnet.stellar.org",
     settlementContractId: process.env.SETTLEMENT_CONTRACT_ID ?? "",
     solverRegistryContractId: process.env.SOLVER_REGISTRY_CONTRACT_ID ?? "",
     signerSecretKey: process.env.STELLAR_SIGNER_SECRET_KEY ?? "",
     signingKey: process.env.SOROBAN_SIGNING_KEY ?? "",
     feePercentile: (process.env.SOROBAN_FEE_PERCENTILE ?? "p50") as FeePercentile,
+  },
+  treasury: {
+    address: process.env.TREASURY_ADDRESS ?? "",
   },
   onchainIntentsEnabled: (process.env.ONCHAIN_INTENTS_ENABLED ?? "false") === "true",
   intentRetentionDays: parseInt(process.env.INTENT_RETENTION_DAYS ?? "30", 10),
@@ -167,6 +272,42 @@ export default (): AppConfig => ({
   wsMaxConnections: parseInt(process.env.WS_MAX_CONNECTIONS ?? "1000", 10),
   wsBackplane: (process.env.WS_BACKPLANE ?? "memory") as "memory" | "redis",
   redisUrl: process.env.REDIS_URL ?? "redis://localhost:6379",
+
+  // ── Resource-exhaustion limits (issue #476) ───────────────────────────────
+  jsonMaxDepth: parseInt(process.env.JSON_MAX_DEPTH ?? "10", 10),
+  wsMaxFilterChains: parseInt(process.env.WS_MAX_FILTER_CHAINS ?? "20", 10),
+  wsMaxSubscriptions: parseInt(process.env.WS_MAX_SUBSCRIPTIONS ?? "10", 10),
+  dbQueryTimeoutMs: parseInt(process.env.DB_QUERY_TIMEOUT_MS ?? "5000", 10),
+  dbBatchQueryTimeoutMs: parseInt(process.env.DB_BATCH_QUERY_TIMEOUT_MS ?? "10000", 10),
+  dbStatsQueryTimeoutMs: parseInt(process.env.DB_STATS_QUERY_TIMEOUT_MS ?? "15000", 10),
+
+  // ── Emergency kill-switch (issue #477) ─────────────────────────────────────
+  killswitch: {
+    operatorToken: process.env.KILLSWITCH_OPERATOR_TOKEN ?? "",
+    // Reuse the WS backplane URL when set; an explicit empty value opts out of
+    // Redis entirely and leaves propagation to database polling.
+    redisUrl:
+      process.env.KILLSWITCH_REDIS_URL ??
+      (process.env.REDIS_URL && process.env.WS_BACKPLANE === "redis" ? process.env.REDIS_URL : ""),
+    // 2000 ms + request latency stays well inside the 5 s propagation budget
+    // even when Redis is unavailable.
+    pollMs: parseInt(process.env.KILLSWITCH_POLL_MS ?? "2000", 10),
+  shadow: {
+    // Off by default: the monitor costs one simulation per sampled transition,
+    // so it is opt-in per environment rather than something a deployer
+    // discovers they are paying for.
+    enabled: (process.env.SHADOW_MODE_ENABLED ?? "false") === "true",
+    sampleRate: clampSampleRate(process.env.SHADOW_SAMPLE_RATE),
+    queueMax: clampPositiveInt(process.env.SHADOW_QUEUE_MAX, 256),
+    concurrency: clampPositiveInt(process.env.SHADOW_CONCURRENCY, 4),
+    sourceAccount: process.env.SHADOW_SOURCE_ACCOUNT ?? "",
+  governance: {
+    paramsContractId: process.env.PARAMS_CONTRACT_ID ?? "",
+    paramsPollIntervalMs: parseInt(process.env.PARAMS_POLL_INTERVAL_MS ?? "30000", 10),
+  leaderElection: {
+    enabled: (process.env.LEADER_ELECTION_ENABLED ?? "false") === "true",
+    heartbeatMs: parseInt(process.env.LEADER_ELECTION_HEARTBEAT_MS ?? "5000", 10),
+  },
   processRole: (process.env.PROCESS_ROLE ?? "all") as AppConfig["processRole"],
   jobs: {
     driver: (process.env.JOBS_DRIVER ?? "memory") as AppConfig["jobs"]["driver"],
@@ -184,3 +325,25 @@ export default (): AppConfig => ({
     .map((a) => a.trim())
     .filter(Boolean),
 });
+
+/** Parse `SHADOW_SAMPLE_RATE` into a probability, defaulting to full sampling. */
+function clampSampleRate(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === "") return 1;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return 1;
+  if (parsed < 0) return 0;
+  if (parsed > 1) return 1;
+  return parsed;
+}
+
+/**
+ * Parse a positive integer env var, falling back to `fallback` for anything
+ * unparseable or non-positive. Keeps a typo from turning the bounded queue
+ * into an unbounded one.
+ */
+function clampPositiveInt(raw: string | undefined, fallback: number): number {
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) return fallback;
+  return parsed;
+}

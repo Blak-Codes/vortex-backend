@@ -26,7 +26,7 @@ tests:
           - exp_labels: { severity: page, network: testnet }
             exp_annotations:
               summary: "Canary lifecycle failing on testnet"
-              description: "No successful create→quote→accept→fill→confirm run in 3 intervals. See docs/runbooks/on-call.md#scenario-d--synthetic-canary-failing"
+              description: "No successful create→quote→accept→fill→confirm run in 3 intervals. See docs/runbooks/on-call.md#scenario-e--synthetic-canary-failing"
       - eval_time: 25m
         alertname: VortexCanaryFundsLow
         exp_alerts:

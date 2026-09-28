@@ -27,7 +27,7 @@ import { PrismaService } from "../prisma/prisma.service";
 import { AdminAuditService } from "../admin/admin-audit.service";
 import { AdminPrincipal } from "../admin/admin-auth";
 import { MetricsService } from "../metrics/metrics.service";
-import { KillSwitchService } from "../killswitch/killswitch.service";
+import { GuardianStateService } from "../governance/guardian-state.service";
 import { evaluateFlag } from "./flag-evaluator";
 import { FLAG_REGISTRY, FlagKey, isFlagKey, parseFlagOverrides } from "./flag-registry";
 import { FlagBus, InMemoryFlagBus, RedisFlagBus } from "./flag-bus";
@@ -68,7 +68,7 @@ export class FeatureFlagService implements OnModuleInit, OnModuleDestroy {
     private readonly prisma: PrismaService,
     private readonly audit: AdminAuditService,
     @Optional() private readonly metrics?: MetricsService,
-    @Optional() private readonly killSwitch?: KillSwitchService,
+    @Optional() private readonly guardian?: GuardianStateService,
     @Optional() @Inject(FLAG_BUS) bus?: FlagBus,
   ) {
     const flags = config.get("flags", { infer: true });
@@ -242,7 +242,7 @@ export class FeatureFlagService implements OnModuleInit, OnModuleDestroy {
 
   private assertMutable(key: string): FlagKey {
     if (!isFlagKey(key)) throw new BadRequestException(`Unknown flag "${key}"`);
-    if (this.killSwitch?.isParamFrozen(key)) {
+    if (this.guardian?.isParamFrozen(key)) {
       throw new ConflictException(`Flag "${key}" is frozen by a guardian action`);
     }
     return key;

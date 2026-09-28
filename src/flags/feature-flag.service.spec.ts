@@ -4,7 +4,7 @@ import { ConfigService } from "@nestjs/config";
 import { AppConfig } from "../config/configuration";
 import { PrismaService } from "../prisma/prisma.service";
 import { AdminAuditService } from "../admin/admin-audit.service";
-import { KillSwitchService } from "../killswitch/killswitch.service";
+import { GuardianStateService } from "../governance/guardian-state.service";
 import { MetricsService } from "../metrics/metrics.service";
 import { FeatureFlagService } from "./feature-flag.service";
 import { InMemoryFlagBus } from "./flag-bus";
@@ -72,7 +72,7 @@ async function makeService(opts: {
   prisma?: any;
   bus?: InMemoryFlagBus;
   cfg?: Parameters<typeof config>[0];
-  killSwitch?: KillSwitchService;
+  guardian?: GuardianStateService;
   metrics?: MetricsService;
 } = {}) {
   const prisma = opts.prisma ?? fakePrisma();
@@ -81,7 +81,7 @@ async function makeService(opts: {
     prisma as PrismaService,
     new AdminAuditService(prisma as PrismaService),
     opts.metrics,
-    opts.killSwitch,
+    opts.guardian,
     opts.bus ?? new InMemoryFlagBus(),
   );
   await service.onModuleInit();
@@ -218,9 +218,9 @@ describe("FeatureFlagService", () => {
   });
 
   it("rejects changes to a flag frozen by a guardian action", async () => {
-    const killSwitch = new KillSwitchService();
-    killSwitch.setParamFrozen("onchain-dry-run", true, { since: "t", reason: "guardian" });
-    const { service } = await makeService({ killSwitch });
+    const guardian = new GuardianStateService();
+    guardian.setParamFrozen("onchain-dry-run", true, { since: "t", reason: "guardian" });
+    const { service } = await makeService({ guardian });
     await expect(
       service.update("onchain-dry-run", { defaultValue: true, rules: [] }, alice, "x"),
     ).rejects.toBeInstanceOf(ConflictException);
