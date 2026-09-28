@@ -172,6 +172,7 @@ export interface AppConfig {
      */
     pollMs: number;
   };
+
   /**
    * Shadow-mode divergence monitor (issue #401).
    *
@@ -197,6 +198,7 @@ export interface AppConfig {
      */
     sourceAccount: string;
   };
+
   governance: {
     /**
      * On-chain governance / parameters contract ID.
@@ -211,6 +213,7 @@ export interface AppConfig {
      */
     paramsPollIntervalMs: number;
   };
+
   leaderElection: {
     /** When false, all workers run unconditionally (pre-election behaviour). */
     enabled: boolean;
