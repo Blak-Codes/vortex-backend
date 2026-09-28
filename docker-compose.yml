@@ -38,5 +38,79 @@ services:
       - .:/app
     command: sh -c "npx prisma migrate deploy && npm run dev -- --host 0.0.0.0"
 
+  # ── Observability profile (issue #481) ─────────────────────────────────────
+  # Brought up with:  docker compose --profile observability up -d
+  #
+  # Grafana <http://localhost:3001> (anonymous viewing, admin/admin) serves the
+  # five committed dashboards in ops/grafana/dashboards. They are provisioned
+  # from disk with allowUiUpdates: false, so a panel edited in the UI is
+  # reverted on the next provisioning pass - edit ops/grafana/build.mjs instead.
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: vortex-prometheus
+    restart: unless-stopped
+    profiles: ["observability"]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-lifecycle
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./ops/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./ops/prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus-data:/prometheus
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: vortex-grafana
+    restart: unless-stopped
+    profiles: ["observability"]
+    depends_on:
+      - prometheus
+      - loki
+    environment:
+      # Local viewing is intentionally unauthenticated. Do not copy this into a
+      # shared or public deployment - see ops/grafana/README.md.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_AUTH_BASIC_ENABLED: "false"
+      GF_USERS_DEFAULT_THEME: dark
+    ports:
+      - "3001:3000"
+    volumes:
+      - ./ops/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./ops/grafana/dashboards:/etc/grafana/provisioning/dashboards/json:ro
+      - grafana-data:/var/lib/grafana
+
+  # Log aggregation. Nothing in the service emits spans yet, so Tempo is wired
+  # up but idle; the datasource is provisioned so turning tracing on later is a
+  # config change rather than a dashboard rebuild.
+  loki:
+    image: grafana/loki:3.1.1
+    container_name: vortex-loki
+    restart: unless-stopped
+    profiles: ["observability"]
+    command: -config.file=/etc/loki/loki.yml
+    volumes:
+      - ./ops/observability/loki.yml:/etc/loki/loki.yml:ro
+      - loki-data:/loki
+
+  tempo:
+    image: grafana/tempo:2.5.0
+    container_name: vortex-tempo
+    restart: unless-stopped
+    profiles: ["observability"]
+    command: -config.file=/etc/tempo/tempo.yml
+    volumes:
+      - ./ops/observability/tempo.yml:/etc/tempo/tempo.yml:ro
+      - tempo-data:/var/tempo
+
 volumes:
   postgres-data:
+  prometheus-data:
+  grafana-data:
+  loki-data:
+  tempo-data:

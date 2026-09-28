@@ -6,13 +6,14 @@ import { ValidationPipe, Logger } from "@nestjs/common";
 import { WsAdapter } from "@nestjs/platform-ws";
 import { DocumentBuilder, SwaggerModule } from "@nestjs/swagger";
 import helmet from "helmet";
-import { json } from "express";
+import { json, Request, Response, NextFunction } from "express";
 import { AppModule } from "./app.module";
 import { AppConfig } from "./config/configuration";
 import { LoggingInterceptor } from "./common/logging.interceptor";
 import { HttpExceptionFilter } from "./common/http-exception.filter";
 import { initSentry } from "./common/sentry";
 import { IntentsSweeperService } from "./intents/intents-sweeper.service";
+import { BODY_SIZE_LIMIT, JSON_MAX_DEPTH } from "./config/limits.config";
 
 // Initialise Sentry before the NestJS app boots so that any startup errors
 // are also captured.  No-op when SENTRY_DSN is not set.
@@ -65,10 +66,53 @@ async function bootstrap() {
 
   // Issue #20 — trust the first proxy hop so Helmet/HSTS sees the real
   // forwarded protocol when TLS terminates upstream behind nginx/ALB.
-  app.set("trust proxy", 1);
+  //
+  // `set` lives on the underlying Express instance; INestApplication's public
+  // type does not declare it, so narrow to the Express app before calling.
+  (app.getHttpAdapter().getInstance() as { set: (key: string, value: unknown) => void }).set(
+    "trust proxy",
+    1,
+  );
 
   // Issue #46 — explicit, tight body-size cap (DTOs are tiny)
-  app.use(json({ limit: "10kb" }));
+  app.use(json({ limit: BODY_SIZE_LIMIT }));
+
+  // Issue #476 — reject JSON bodies whose nesting depth exceeds JSON_MAX_DEPTH.
+  // Deep nesting can exhaust the call stack in both the JSON parser and the
+  // recursive class-validator traversal before any field decorator fires.
+  // All real DTOs are flat (depth ≤ 2); this cap of 10 gives 5× headroom.
+  //
+  // This middleware runs after express.json() has already parsed the body,
+  // so we can inspect the already-materialised JS object without re-serialising.
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    if (!req.is("application/json")) return next();
+
+    const effectiveDepth = parseInt(process.env.JSON_MAX_DEPTH ?? String(JSON_MAX_DEPTH), 10);
+
+    /**
+     * Measure the maximum nesting depth of an already-parsed JS value without
+     * re-serialising it.  Pure recursive descent — depth O(n) on the number of
+     * nodes, stack depth O(d) on the nesting depth.
+     */
+    function maxDepth(value: unknown, depth = 0): number {
+      if (depth > effectiveDepth) return depth; // short-circuit once exceeded
+      if (value === null || typeof value !== "object") return depth;
+      const children = Object.values(value as Record<string, unknown>);
+      if (children.length === 0) return depth;
+      return Math.max(...children.map((v) => maxDepth(v, depth + 1)));
+    }
+
+    if (req.body !== undefined && maxDepth(req.body) > effectiveDepth) {
+      res.status(400).json({
+        statusCode: 400,
+        error: "Bad Request",
+        message: `JSON nesting depth exceeds the maximum allowed depth of ${effectiveDepth}`,
+      });
+      return;
+    }
+
+    next();
+  });
 
   // Issue #43 / #302 — verify the security headers we rely on in production.
   // HSTS is explicitly configured so it is not silently skipped when a TLS

@@ -3,6 +3,7 @@ import {
   Asset,
   BASE_FEE,
   Keypair,
+  nativeToScVal,
   Networks,
   Operation,
   SorobanRpc,
@@ -10,9 +11,10 @@ import {
   TransactionBuilder,
 } from "@stellar/stellar-sdk";
 import { ConfigService } from "@nestjs/config";
-import { StellarTxService } from "./stellar-tx.service";
+import { StellarTxService, type SimulateContractParams } from "./stellar-tx.service";
 import { SorobanService } from "./soroban.service";
 import { AppConfig } from "../config/configuration";
+import { KillSwitchService } from "../killswitch/killswitch.service";
 
 function buildTestTransaction(fee = "100"): Transaction {
   const keypair = Keypair.random();
@@ -61,10 +63,24 @@ function simulationError(message: string): SorobanRpc.Api.SimulateTransactionErr
   return { id: "1", error: message, latestLedger: 1, events: [], _parsed: true };
 }
 
+/** A syntactically valid contract id (`Address.fromString` must accept it). */
+const CONTRACT_ID = "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA";
+
+/** Width of a transaction's ledger validity window, in seconds. */
+function validityWindowSeconds(transaction: Transaction): number {
+  const bounds = transaction.timeBounds;
+  if (!bounds) throw new Error("expected the simulation envelope to carry a validity window");
+  return Number(bounds.maxTime) - Number(bounds.minTime);
+}
+
 describe("StellarTxService", () => {
   let sorobanService: jest.Mocked<Pick<SorobanService, "getFeeStats" | "simulateTransaction" | "prepareTransaction">>;
   let configService: jest.Mocked<Pick<ConfigService<AppConfig, true>, "get">>;
+  let killSwitch: { evaluateTarget: jest.Mock };
   let service: StellarTxService;
+
+  /** Default: no pause active, so pre-existing behaviour is unchanged. */
+  const notPaused = { paused: false, matched: null, matchedChain: [] };
 
   beforeEach(() => {
     sorobanService = {
@@ -73,9 +89,11 @@ describe("StellarTxService", () => {
       prepareTransaction: jest.fn(),
     };
     configService = { get: jest.fn().mockReturnValue("p50") };
+    killSwitch = { evaluateTarget: jest.fn().mockReturnValue(notPaused) };
     service = new StellarTxService(
       sorobanService as unknown as SorobanService,
       configService as unknown as ConfigService<AppConfig, true>,
+      killSwitch as unknown as KillSwitchService,
     );
   });
 
@@ -146,6 +164,7 @@ describe("StellarTxService", () => {
       const dryRunService = new StellarTxService(
         sorobanService as unknown as SorobanService,
         dryRunConfigService,
+        killSwitch as unknown as KillSwitchService,
       );
 
       const result = await dryRunService.invokeContract({
@@ -173,6 +192,7 @@ describe("StellarTxService", () => {
       const liveService = new StellarTxService(
         sorobanService as unknown as SorobanService,
         liveConfigService,
+        killSwitch as unknown as KillSwitchService,
       );
 
       await expect(
@@ -182,6 +202,261 @@ describe("StellarTxService", () => {
           args: [],
         }),
       ).rejects.toThrow(/not yet implemented/);
+    });
+  });
+
+  describe("simulateContract (#401 read-only shadow primitive)", () => {
+    const sourceKeypair = Keypair.random();
+
+    type SimulateDeps = jest.Mocked<
+      Pick<
+        SorobanService,
+        "getFeeStats" | "simulateTransaction" | "getAccount" | "getLatestLedger" | "prepareTransaction" | "submitTransaction"
+      >
+    >;
+
+    function buildShadowService(
+      config: {
+        queueMax?: unknown;
+        concurrency?: unknown;
+        onchainDryRun?: boolean;
+      } = {},
+    ): { service: StellarTxService; soroban: SimulateDeps } {
+      const soroban: SimulateDeps = {
+        getFeeStats: jest.fn().mockResolvedValue(feeStats("100")),
+        simulateTransaction: jest.fn(),
+        getAccount: jest.fn().mockResolvedValue(new Account(sourceKeypair.publicKey(), "42")),
+        getLatestLedger: jest.fn().mockResolvedValue({ id: "1", sequence: "500" }),
+        prepareTransaction: jest.fn(),
+        submitTransaction: jest.fn(),
+      };
+
+      const configService = {
+        get: jest.fn((key: string) => {
+          if (key === "stellar.feePercentile") return "p50";
+          if (key === "stellar.network") return "testnet";
+          if (key === "onchainDryRun") return config.onchainDryRun ?? true;
+          if (key === "shadow.queueMax") return config.queueMax;
+          if (key === "shadow.concurrency") return config.concurrency;
+          return undefined;
+        }),
+      } as unknown as ConfigService<AppConfig, true>;
+
+      return {
+        service: new StellarTxService(soroban as unknown as SorobanService, configService),
+        soroban,
+      };
+    }
+
+    function params(overrides: Partial<SimulateContractParams> = {}): SimulateContractParams {
+      return {
+        contractId: CONTRACT_ID,
+        method: "accept_intent",
+        args: [nativeToScVal("intent-1", { type: "string" })],
+        sourceAccount: sourceKeypair.publicKey(),
+        ...overrides,
+      };
+    }
+
+    it("reports ok when the contract would have accepted the call", async () => {
+      const { service, soroban } = buildShadowService();
+      soroban.simulateTransaction.mockResolvedValue(simulationSuccess("45000"));
+
+      await expect(service.simulateContract(params())).resolves.toEqual({ outcome: "ok" });
+    });
+
+    it("never prepares or submits anything — the envelope is unsigned and unbroadcast", async () => {
+      const { service, soroban } = buildShadowService();
+      soroban.simulateTransaction.mockResolvedValue(simulationSuccess("45000"));
+
+      await service.simulateContract(params());
+
+      expect(soroban.simulateTransaction).toHaveBeenCalledTimes(1);
+      expect(soroban.prepareTransaction).not.toHaveBeenCalled();
+      expect(soroban.submitTransaction).not.toHaveBeenCalled();
+    });
+
+    it("simulates even with ONCHAIN_DRY_RUN unset, because dry-run governs broadcast", async () => {
+      const { service, soroban } = buildShadowService({ onchainDryRun: false });
+      soroban.simulateTransaction.mockResolvedValue(simulationSuccess("45000"));
+
+      await expect(service.simulateContract(params())).resolves.toEqual({ outcome: "ok" });
+    });
+
+    it("skips rather than guesses when no source account is configured", async () => {
+      const { service, soroban } = buildShadowService();
+
+      const result = await service.simulateContract(params({ sourceAccount: "  " }));
+
+      expect(result.outcome).toBe("skipped");
+      expect(result.detail).toMatch(/source account/i);
+      expect(soroban.simulateTransaction).not.toHaveBeenCalled();
+    });
+
+    it("skips when no settlement contract is configured", async () => {
+      const { service, soroban } = buildShadowService();
+
+      const result = await service.simulateContract(params({ contractId: "" }));
+
+      expect(result.outcome).toBe("skipped");
+      expect(result.detail).toMatch(/contract/i);
+      expect(soroban.simulateTransaction).not.toHaveBeenCalled();
+    });
+
+    it("classifies a contract guard failure as a rejection, not an error", async () => {
+      const { service, soroban } = buildShadowService();
+      soroban.simulateTransaction.mockResolvedValue(
+        simulationError("HostError: Error(Contract, #1) insufficient balance"),
+      );
+
+      const result = await service.simulateContract(params());
+
+      expect(result.outcome).toBe("rejected");
+      expect(result.detail).toContain("insufficient balance");
+    });
+
+    it("classifies a hard failure as a contract error", async () => {
+      const { service, soroban } = buildShadowService();
+      soroban.simulateTransaction.mockResolvedValue(
+        simulationError("HostError: Error(WasmVm, InvalidAction) missing export"),
+      );
+
+      const result = await service.simulateContract(params());
+
+      expect(result.outcome).toBe("error");
+      expect(result.detail).toContain("missing export");
+    });
+
+    it("reports an unreachable RPC as unavailable, not as a contract failure", async () => {
+      const { service, soroban } = buildShadowService();
+      soroban.simulateTransaction.mockRejectedValue(new Error("connect ECONNREFUSED"));
+
+      const result = await service.simulateContract(params());
+
+      expect(result.outcome).toBe("unavailable");
+      expect(result.detail).toContain("ECONNREFUSED");
+    });
+
+    it("reports an empty response as unavailable", async () => {
+      const { service, soroban } = buildShadowService();
+      soroban.simulateTransaction.mockResolvedValue(
+        undefined as unknown as SorobanRpc.Api.SimulateTransactionResponse,
+      );
+
+      await expect(service.simulateContract(params())).resolves.toMatchObject({
+        outcome: "unavailable",
+      });
+    });
+
+    it("reports an unbuildable envelope as unavailable without asking the contract", async () => {
+      const { service, soroban } = buildShadowService();
+
+      const result = await service.simulateContract(params({ contractId: "not-a-contract-id" }));
+
+      expect(result.outcome).toBe("unavailable");
+      expect(result.detail).toMatch(/could not build/i);
+      expect(soroban.simulateTransaction).not.toHaveBeenCalled();
+    });
+
+    it("uses the source account's real sequence number when it is on chain", async () => {
+      const { service, soroban } = buildShadowService();
+      soroban.simulateTransaction.mockResolvedValue(simulationSuccess("1"));
+
+      await service.simulateContract(params());
+
+      const [submitted] = soroban.simulateTransaction.mock.calls[0];
+      expect((submitted as Transaction).source.sequenceNumber()).toBe("42");
+      expect(soroban.getLatestLedger).not.toHaveBeenCalled();
+    });
+
+    it("falls back to the latest ledger for a source account that has never been on chain", async () => {
+      const { service, soroban } = buildShadowService();
+      soroban.getAccount.mockRejectedValue(new Error("not found"));
+      soroban.simulateTransaction.mockResolvedValue(simulationSuccess("1"));
+
+      await service.simulateContract(params());
+
+      const [submitted] = soroban.simulateTransaction.mock.calls[0];
+      // 500 (latest closed) + 1: the next sequence the account would hold.
+      expect((submitted as Transaction).source.sequenceNumber()).toBe("501");
+    });
+
+    it("falls back to sequence 0 when neither the account nor the ledger can be read", async () => {
+      const { service, soroban } = buildShadowService();
+      soroban.getAccount.mockRejectedValue(new Error("not found"));
+      soroban.getLatestLedger.mockRejectedValue(new Error("rpc down"));
+      soroban.simulateTransaction.mockResolvedValue(simulationSuccess("1"));
+
+      const result = await service.simulateContract(params());
+
+      expect(result.outcome).toBe("ok");
+      const [submitted] = soroban.simulateTransaction.mock.calls[0];
+      expect((submitted as Transaction).source.sequenceNumber()).toBe("0");
+    });
+
+    it("builds a single, well-formed host-function operation for the named method", async () => {
+      const { service, soroban } = buildShadowService();
+      soroban.simulateTransaction.mockResolvedValue(simulationSuccess("1"));
+
+      const result = await service.simulateContract(params({ method: "fill_intent" }));
+
+      expect(result.outcome).toBe("ok");
+      const [submitted] = soroban.simulateTransaction.mock.calls[0];
+      const envelope = (submitted as Transaction).toEnvelope();
+      expect(envelope.operations()).toHaveLength(1);
+      // Round-trips through XDR, so the host function and every ScVal the
+      // monitor built are structurally valid — which is the whole reason the
+      // monitor cannot blame a malformed envelope for a "divergence".
+      expect(() => envelope.toXDR()).not.toThrow();
+    });
+
+    it("sizes the ledger validity window from the worst-case shadow queue drain", async () => {
+      // 1000 queued at 4-way concurrency = 250 sequential batches; at an
+      // assumed 3 s per simulation that is 750 s, plus 60 s of slack.
+      const { service, soroban } = buildShadowService({ queueMax: 1000, concurrency: 4 });
+      soroban.simulateTransaction.mockResolvedValue(simulationSuccess("1"));
+
+      await service.simulateContract(params());
+
+      const [submitted] = soroban.simulateTransaction.mock.calls[0];
+      expect(validityWindowSeconds(submitted as Transaction)).toBe(810);
+    });
+
+    it("clamps the validity window to a ledger-acceptable range", async () => {
+      // Floor: 256 queued at 4-way concurrency is well under a minute of
+      // drain, so the 300 s minimum applies.
+      const small = buildShadowService({ queueMax: 256, concurrency: 4 });
+      small.soroban.simulateTransaction.mockResolvedValue(simulationSuccess("1"));
+      await small.service.simulateContract(params());
+      const [smallTx] = small.soroban.simulateTransaction.mock.calls[0];
+      expect(validityWindowSeconds(smallTx as Transaction)).toBe(300);
+
+      // Ceiling: an absurd queue must not produce an absurd window.
+      const huge = buildShadowService({ queueMax: 1_000_000, concurrency: 1 });
+      huge.soroban.simulateTransaction.mockResolvedValue(simulationSuccess("1"));
+      await huge.service.simulateContract(params());
+      const [hugeTx] = huge.soroban.simulateTransaction.mock.calls[0];
+      expect(validityWindowSeconds(hugeTx as Transaction)).toBe(3600);
+    });
+
+    it("still builds a valid envelope when the queue settings are unparseable", async () => {
+      const { service, soroban } = buildShadowService({ queueMax: "many", concurrency: NaN });
+      soroban.simulateTransaction.mockResolvedValue(simulationSuccess("1"));
+
+      const result = await service.simulateContract(params());
+
+      expect(result.outcome).toBe("ok");
+      const [submitted] = soroban.simulateTransaction.mock.calls[0];
+      expect(validityWindowSeconds(submitted as Transaction)).toBe(300);
+    });
+
+    it("never throws, whatever the RPC does", async () => {
+      const { service, soroban } = buildShadowService();
+      soroban.getFeeStats.mockRejectedValue(new Error("fee stats down"));
+
+      await expect(service.simulateContract(params())).resolves.toMatchObject({
+        outcome: "unavailable",
+      });
     });
   });
 });
