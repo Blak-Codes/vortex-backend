@@ -467,9 +467,9 @@ jobs:
           curl -sL https://github.com/prometheus/prometheus/releases/download/v2.53.0/prometheus-2.53.0.linux-amd64.tar.gz | tar xz
           sudo mv prometheus-2.53.0.linux-amd64/promtool /usr/local/bin/
       - name: Check rules
-        run: promtool check rules ops/prometheus/rules/vortex-slo.yml
+        run: promtool check rules ops/prometheus/rules/vortex-slo.yml ops/prometheus/rules/vortex-canary.yml
       - name: Unit-test rules
-        run: promtool test rules ops/prometheus/rules/vortex-slo_test.yml
+        run: promtool test rules ops/prometheus/rules/vortex-slo_test.yml ops/prometheus/rules/vortex-canary_test.yml
       - name: Check rule file is also a valid Prometheus config fragment
         run: promtool check config ops/prometheus/prometheus.yml
 
@@ -507,6 +507,39 @@ jobs:
         with:
           name: grafana-dashboards
           path: ops/grafana/dashboards
+
+  # ── Synthetic canary against the docker-compose stack (issue #496) ────────
+  canary:
+    name: Canary – local lifecycle run (docker-compose)
+    runs-on: ubuntu-latest
+    needs: backend
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Generate throwaway canary keys
+        run: |
+          node -e '
+            const { Keypair } = require("@stellar/stellar-sdk");
+            const u = Keypair.random(), s = Keypair.random();
+            console.log(`CANARY_USER_SECRET=${u.secret()}`);
+            console.log(`CANARY_SOLVER_SECRET=${s.secret()}`);
+            console.log(`CANARY_ADDRESSES=${u.publicKey()},${s.publicKey()}`);
+          ' >> "$GITHUB_ENV"
+      - name: Start stack
+        run: docker compose up -d --build --wait postgres redis && docker compose up -d app
+      - name: Wait for API
+        run: timeout 300 sh -c 'until curl -sf http://localhost:4000/health/live; do sleep 5; done'
+      - name: Run canary once
+        env:
+          CANARY_SETTLE_ONCHAIN: "false"
+        run: npm run canary -- --once
+      - name: Stack logs
+        if: failure()
+        run: docker compose logs app
 
   # ── Migration rollback verification ────────────────────────────────────────
   # For every prisma/migrations/*/down.sql, applies migration.sql then
@@ -561,6 +594,51 @@ jobs:
             fi
             echo "::endgroup::"
           done
+
+  # ── Migration lint ─────────────────────────────────────────────────────────
+  # Blocks unsafe DDL in migrations this change adds or modifies: non-concurrent
+  # index builds/drops, column type rewrites, NOT NULL without a default,
+  # lock-heavy constraints, LOCK TABLE. Also requires a down.sql in every such
+  # migration. Untouched migrations aren't linted, so older ones can't fail
+  # retroactively. The rules and the `-- squawk-ignore` override are in
+  # prisma/migrations/README.md.
+  migration-lint:
+    name: Migration lint (squawk)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so the diff base below is always present.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # --ignore-scripts skips Prisma's engine download and the husky hook;
+      # neither is needed here, and it keeps the job well under 2 minutes.
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Test the migration checker (fixtures)
+        run: npm run test:scripts
+
+      - name: Lint changed migrations
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          # Pull requests: GitHub checks out a merge commit whose first parent is
+          # the base branch tip, so HEAD^1 is exactly "everything this PR adds".
+          # Pushes: diff against the commit that was on the branch before the push.
+          if [ "$EVENT_NAME" = "pull_request" ] || [ -z "$BEFORE_SHA" ] || [ -z "${BEFORE_SHA//0/}" ]; then
+            base="HEAD^1"
+          else
+            base="$BEFORE_SHA"
+          fi
+          npm run check:migrations -- --base "$base"
 
   # ── Docker build verification (#131) ──────────────────────────────────────
   # Ensures every push that changes application code doesn't silently break

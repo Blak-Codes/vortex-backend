@@ -50,6 +50,12 @@ function makeConfigService(
       enabled: false,
       heartbeatMs: 5000,
     },
+    processRole: "all",
+    jobs: { driver: "memory", shutdownTimeoutMs: 25000 },
+    flags: { pubsub: "memory", refreshMs: 30000, overrides: "" },
+    adminApiKeys: "",
+    guardianContractId: "",
+    canaryAddresses: [],
   };
   return {
     get: (key: string) => {

@@ -268,6 +268,8 @@ model KillSwitchApproval {
   @@unique([killSwitchId, approver])
   @@index([killSwitchId])
   @@map("kill_switch_approvals")
+}
+
 // ─── TreasurySnapshot ────────────────────────────────────────────────────────
 // Daily snapshots of expected vs actual treasury balances per asset.
 // Used for reconciliation and historical reporting.
@@ -369,4 +371,83 @@ model RefundLedger {
   @@index([userAddress])
   @@index([asset, issuedAt])
   @@map("refund_ledger")
+}
+
+// ─── AdminAuditLog ───────────────────────────────────────────────────────────
+// Append-only record of privileged operator and governance actions: feature
+// flag changes (issue #495), kill-switch toggles and guardian overrides (#507).
+
+model AdminAuditLog {
+  id        BigInt   @id @default(autoincrement()) @map("id")
+  /// Admin principal id, or "guardian" / "system" for automated actions.
+  actor     String   @map("actor")
+  /// Dotted action name, e.g. "flag.update", "guardian.override".
+  action    String   @map("action")
+  /// Target of the action, e.g. "flag:onchain-dry-run".
+  target    String   @map("target")
+  before    Json?    @map("before")
+  after     Json?    @map("after")
+  reason    String?  @map("reason")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  @@index([target, createdAt(sort: Desc)])
+  @@map("admin_audit_log")
+}
+
+// ─── FeatureFlag ─────────────────────────────────────────────────────────────
+// Runtime feature flags (issue #495). `rules` is an ordered JSON array of
+// { value, percentage?, solvers?, chains? }; the first matching rule wins.
+
+model FeatureFlag {
+  key          String   @id @map("key")
+  defaultValue Boolean  @map("default_value")
+  rules        Json     @map("rules")
+  version      Int      @default(1) @map("version")
+  updatedBy    String   @map("updated_by")
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@map("feature_flags")
+}
+
+// Pending flag changes that need a second approver (e.g. dry-run off in production).
+model FlagChangeRequest {
+  id         String    @id @default(uuid()) @map("id")
+  flagKey    String    @map("flag_key")
+  /// Proposed { defaultValue, rules }.
+  proposed   Json      @map("proposed")
+  proposedBy String    @map("proposed_by")
+  /// Admin ids that approved, proposer first.
+  approvals  String[]  @map("approvals")
+  /// pending | applied
+  status     String    @default("pending") @map("status")
+  reason     String?   @map("reason")
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  appliedAt  DateTime? @map("applied_at") @db.Timestamptz
+
+  @@index([flagKey, status])
+  @@map("flag_change_requests")
+}
+
+// ─── GuardianAction ──────────────────────────────────────────────────────────
+// Emergency actions ingested from the on-chain guardian contract (issue #507).
+// One row per activating event; cleared by the matching guardian event or a
+// superadmin override.
+
+model GuardianAction {
+  /// Soroban event id of the activating event.
+  id             String    @id @map("id")
+  /// pause | freeze | blacklist
+  kind           String    @map("kind")
+  /// Frozen parameter key or blacklisted solver address; "" for pause.
+  target         String    @map("target")
+  active         Boolean   @map("active")
+  txHash         String    @map("tx_hash")
+  ledger         Int       @map("ledger")
+  activatedAt    DateTime  @map("activated_at") @db.Timestamptz
+  clearedAt      DateTime? @map("cleared_at") @db.Timestamptz
+  clearedTxHash  String?   @map("cleared_tx_hash")
+  overriddenBy   String?   @map("overridden_by")
+
+  @@index([active])
+  @@map("guardian_actions")
 }

@@ -1,4 +1,15 @@
-# Migration rollback convention
+# Prisma migrations
+
+Two CI jobs guard every migration in this directory:
+
+| Job | Checks |
+|-----|--------|
+| `migration-lint` | Migrations the PR adds or changes contain no unsafe DDL and each ships a `down.sql` (see [Migration lint](#migration-lint)) |
+| `migration-rollback` | `down.sql` reverses `migration.sql` against a real Postgres (see [Rollback convention](#rollback-convention)) |
+
+---
+
+## Rollback convention
 
 Prisma does not generate "down" migrations automatically. To allow a targeted
 rollback of a single bad migration (instead of a full backup/restore), every
@@ -11,26 +22,95 @@ prisma/migrations/<timestamp>_<name>/
   down.sql        # hand-authored rollback for migration.sql (this convention)
 ```
 
-## Authoring a down.sql
+### Authoring a down.sql
 
 - `down.sql` must reverse exactly what `migration.sql` in the same directory
   does — dropping tables/columns/types/indexes it created, restoring anything
   it dropped, etc.
 - Prefer `IF EXISTS` / `IF NOT EXISTS` guards so the script is safe to re-run.
 - If a forward migration is destructive (e.g. drops a column with data), the
-  down.sql cannot restore lost data — note that limitation in a comment at
-  the top of the file.
+  down.sql cannot restore lost data — note that limitation in a comment at the
+  top of the file.
 
-## CI verification
+### CI verification
 
 `.github/workflows/ci.yml` runs a `migration-rollback` job that, for every
 migration directory containing a `down.sql`, applies `migration.sql` then
 `down.sql` against a fresh Postgres instance and diffs the resulting schema
 against the pre-migration (empty) schema, failing the build if they differ.
 
+---
+
+## Migration lint
+
+The `migration-lint` CI job runs a self-contained checker
+(`scripts/check-migrations.ts`, a "squawk-equivalent" — no external binary)
+over the migrations a PR adds or modifies. It **only lints changed migrations**,
+so older migrations can never fail retroactively.
+
+### Unsafe-DDL rules
+
+A migration fails lint when any changed `migration.sql` contains:
+
+| Rule id | Trigger | Why it's unsafe |
+|---------|---------|-----------------|
+| `create-index-without-concurrently` | `CREATE [UNIQUE] INDEX` without `CONCURRENTLY` | Blocks writes on the table for the full build |
+| `drop-index-without-concurrently` | `DROP INDEX` without `CONCURRENTLY` | Takes an exclusive lock |
+| `column-type-rewrite` | `ALTER COLUMN … TYPE` / `SET DATA TYPE` | Rewrites the whole table under `ACCESS EXCLUSIVE` |
+| `not-null-without-default` | `SET NOT NULL`, or `ADD COLUMN … NOT NULL` without `DEFAULT` | Fails on existing NULL rows and locks the table |
+| `lock-table` | `LOCK TABLE` | Explicit table lock blocking concurrent access |
+
+### `down.sql` required
+
+Every changed migration directory must include a `down.sql`. (The init
+migration already does; migrations written before this rule may not — they are
+only required when a change touches them.)
+
+### Suppressing a rule
+
+A migration may suppress a specific rule with a `-- squawk-ignore <rule>`
+comment placed **immediately above** the offending statement. The override is
+rejected unless it is paired with a `-- justification:` comment (same line or
+the line below), and the justification must also be repeated in the PR
+description:
+
+```sql
+-- squawk-ignore create-index-without-concurrently
+-- justification: intents is empty at this point in the rollout
+CREATE INDEX "intents_src_chain_idx" ON "intents"("src_chain");
+```
+
+Or on a single line:
+
+```sql
+-- squawk-ignore lock-table -- justification: table is read-only during this maintenance window
+LOCK TABLE "intents" IN ACCESS EXCLUSIVE MODE;
+```
+
+The `down.sql` requirement can be suppressed the same way, by placing the
+directive at the top of `migration.sql` (for genuinely irreversible, one-way
+data migrations):
+
+```sql
+-- squawk-ignore missing-down-sql -- justification: one-way data migration, cannot be reversed
+```
+
+A `-- squawk-ignore` without a `-- justification:` **fails the build** — it is
+treated as an error, not a silent override.
+
+### Running locally
+
+```bash
+npm run check:migrations          # lint migrations changed since HEAD^1
+npm run check:migrations -- --base <sha>   # lint migrations changed since <sha>
+npm run test:scripts              # run the checker's fixture-based tests
+```
+
+---
+
 ## Out of scope
 
-This convention and its CI check only verify that `down.sql` reverses
-`migration.sql` in isolation. Running a `down.sql` against production is a
-manual, change-managed operation (same process as forward migrations) and is
-not automated here.
+This convention and its CI checks only verify `down.sql` reversal in isolation
+and statically lint for unsafe DDL. Running a `down.sql` (or any migration)
+against production is a manual, change-managed operation and is not automated
+here.

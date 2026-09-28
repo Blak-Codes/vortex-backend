@@ -15,8 +15,10 @@
 4. [Scenario A — Soroban RPC downtime](#scenario-a--soroban-rpc-downtime)
 5. [Scenario B — Stuck or slow sweeper](#scenario-b--stuck-or-slow-sweeper)
 6. [Scenario C — Emergency kill-switch](#scenario-c--emergency-killswitch-issue-477)
-7. [Key configuration](#key-configuration)
-8. [Escalation path](#escalation-path)
+7. [Scenario D — Guardian emergency action](#scenario-d--guardian-emergency-action)
+8. [Scenario E — Synthetic canary failing](#scenario-e--synthetic-canary-failing)
+9. [Key configuration](#key-configuration)
+10. [Escalation path](#escalation-path)
 
 ---
 
@@ -357,6 +359,72 @@ If writes are being refused but no switch is listed, the replica has not loaded
 its snapshot and is failing closed. `ready: false` in `/health` points at the
 database. See "Failure modes" in [killswitch.md](./killswitch.md).
 
+## Scenario D — Guardian emergency action
+
+The backend ingests emergency actions from the on-chain guardian / security
+council contract (`GUARDIAN_CONTRACT_ID`, issue #507) and applies them within
+one poll (10 s) on every instance:
+
+| Guardian event | Backend effect |
+|---|---|
+| `guardian_pause` / `guardian_unpause` | Acts as a global kill switch (reason `GUARDIAN_PAUSE`): every kill-switch-gated write returns **503**. Cancels still work. |
+| `guardian_freeze` / `guardian_unfreeze` (target = flag key or `*`) | Runtime feature flag changes for that key return **409**. |
+| `guardian_blacklist` / `guardian_unblacklist` (target = solver) | Solver cannot accept intents (**403**); operator reactivation returns **409**. |
+
+### Check status
+
+```bash
+curl -s http://localhost:4000/api/v1/governance/guardian/status | jq
+# { paused, guardianPaused, operatorSwitches: [...], guardianActions: [{ id, kind, target, txHash, ledger, activatedAt }], ... }
+```
+
+Every active action carries its `txHash` — confirm it on a block explorer
+before acting.
+
+### Rules while a guardian action is active
+
+- Guardian state is **authoritative**. Operators cannot clear it: resuming
+  operator kill switches (Scenario C), solver reactivation and flag edits on a
+  frozen key do not lift guardian state.
+- The guardian pause is evaluated independently of operator switches. A
+  guardian unpause while an operator switch is active leaves writes paused
+  (and vice versa) — **both must clear**.
+
+### Manual override (break-glass)
+
+Only for a confirmed false positive, with sign-off from the security council.
+Requires a **superadmin** key and is refused unless the audit record is
+written (`admin_audit_log`, action `guardian.override`):
+
+```bash
+curl -X POST -H "x-admin-key: $SUPERADMIN_KEY" -H 'content-type: application/json' \
+  -d '{"reason":"false positive, council ack in #sec-incident"}' \
+  http://localhost:4000/api/v1/governance/guardian/actions/<actionId>/override
+```
+
+The override lasts until the guardian emits a new action for the same target.
+
+---
+
+## Scenario E — Synthetic canary failing
+
+Alerts `VortexCanaryConsecutiveFailures`, `VortexCanaryFundsLow`,
+`VortexCanaryBudgetExceeded` come from the canary CronJob
+(`tools/canary/`, issue #496).
+
+1. Check `vortex_canary_step_duration_seconds{step=...}` for the last step
+   that reported — the failing step is the one after it — and the CronJob pod
+   logs (`[canary] FAILED ...` names the HTTP call and status).
+2. `create`/`accept`/`fill` returning 503 → check Scenarios C and D (paused).
+3. `fill` failing on-chain → canary funds or trustline issue; check
+   `vortex_canary_balance_xlm`.
+4. Funds low / budget exceeded → suspend the CronJob
+   (`kubectl patch cronjob <name> -p '{"spec":{"suspend":true}}'`), top up the
+   canary solver account, investigate fee spikes before resuming.
+
+Canary intents are excluded from public stats and leaderboards via
+`CANARY_ADDRESSES`; if they show up there, that variable is missing on the API.
+
 ---
 
 ## Key configuration
@@ -372,6 +440,10 @@ database. See "Failure modes" in [killswitch.md](./killswitch.md).
 | `KILLSWITCH_REDIS_URL` | `REDIS_URL` when `WS_BACKPLANE=redis` | Cross-replica pause propagation; empty = poll only |
 | `KILLSWITCH_POLL_MS` | `2000` | DB change-probe interval backing up Redis; caps propagation delay |
 | `KILLSWITCH_PERSISTENCE` | `memory` | `prisma` in production, or a pause is lost on restart |
+| `GUARDIAN_CONTRACT_ID` | empty (disabled) | Guardian contract polled for emergency actions |
+| `ADMIN_API_KEYS` | empty (admin APIs disabled) | `id:role:secret` entries for admin / superadmin endpoints |
+| `PROCESS_ROLE` / `JOBS_DRIVER` | `all` / `memory` | Where job workers run; `bullmq` for multi-instance |
+| `CANARY_ADDRESSES` | empty | Canary accounts excluded from public stats |
 
 ---
 
