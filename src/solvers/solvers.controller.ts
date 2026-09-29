@@ -6,6 +6,7 @@ import {
   Get,
   NotFoundException,
   Param,
+  Patch,
   Post,
   Query,
 } from "@nestjs/common";
@@ -18,18 +19,11 @@ import {
   ApiTags,
   ApiUnauthorizedResponse,
 } from "@nestjs/swagger";
-import { IntentsService } from "../intents/intents.service";
-import { buildDisputeMessage, buildRegisterMessage, buildUpdateSolverMessage, verifyStellarSignature, buildSolverStatusMessage } from "../common/stellar-signature";
-import { SolversService, LeaderboardWindow, solverSupports } from "./solvers.service";
-import { ListIntentsDto } from "../intents/dto/list-intents.dto";
-import { ApiNotFoundResponse, ApiOperation, ApiQuery, ApiTags } from "@nestjs/swagger";
 import { ConfigService } from "@nestjs/config";
-import { AppConfig } from "../config/configuration";
-import { isCanaryIntent } from "../common/canary";
 import { IntentsService } from "../intents/intents.service";
 import { IntentCapabilityIndex } from "../intents/solver-intent-matcher";
-import { buildDisputeMessage, verifyStellarSignature, buildSolverStatusMessage, buildRegisterMessage } from "../common/stellar-signature";
 import { SUPPORTED_CHAINS, SupportedChain } from "../intents/intents.types";
+import { ListIntentsDto } from "../intents/dto/list-intents.dto";
 import {
   buildDisputeMessage,
   buildRegisterMessage,
@@ -37,12 +31,14 @@ import {
   buildUpdateSolverMessage,
   verifyStellarSignature,
 } from "../common/stellar-signature";
+import { isCanaryIntent } from "../common/canary";
+import { AppConfig } from "../config/configuration";
 import { SolversService, LeaderboardWindow } from "./solvers.service";
 import { SolverRecord } from "./solvers.types";
 import { RegisterSolverDto } from "./dto/register-solver.dto";
 import { UpdateSolverDto } from "./dto/update-solver.dto";
 import { UpdateSolverStatusDto } from "./dto/update-solver-status.dto";
-import { ListIntentsDto } from "../intents/dto/list-intents.dto";
+import { SolverCredentialService } from "../auth/solver-credentials/solver-credential.service";
 
 const WINDOW_SECONDS: Record<Exclude<LeaderboardWindow, "all">, number> = {
   "24h": 24 * 60 * 60,
@@ -96,6 +92,7 @@ export class SolversController {
     private readonly solversService: SolversService,
     private readonly intentsService: IntentsService,
     private readonly intentIndex: IntentCapabilityIndex,
+    private readonly credentialService: SolverCredentialService,
     config: ConfigService<AppConfig, true>,
   ) {
     this.canary = new Set(config.get("canaryAddresses", { infer: true }) ?? []);
@@ -234,12 +231,6 @@ export class SolversController {
     // Use the capability index for O(supported-chains × supported-tokens)
     // lookup instead of scanning all open intents (issue #436).
     const eligible = this.intentIndex.getEligibleFor(solver);
-    const open = await this.intentsService.getByState("open");
-    const eligible = open.filter(
-      (intent) =>
-        isSupportedChain(intent.srcChain) &&
-        solverSupports(solver, intent.srcChain, intent.srcToken.symbol),
-    );
 
     const limit = Math.min(dto.limit ?? 20, 100);
     const offset = dto.offset ?? 0;
@@ -391,6 +382,8 @@ export class SolversController {
 
     const solver = await this.solversService.deregister(address);
     if (!solver) throw new NotFoundException("Solver not found");
+    // Issue #443 — instantly disable every credential of the deregistered solver.
+    await this.credentialService.disableAllForSolver(address);
     return {
       ...solver,
       withdrawalStatus: "pending",
@@ -404,6 +397,8 @@ export class SolversController {
 
     const solver = await this.solversService.deactivate(address);
     if (!solver) throw new NotFoundException("Solver not found");
+    // Issue #443 — instantly disable every credential of the deactivated solver.
+    await this.credentialService.disableAllForSolver(address);
     return solver;
   }
 
