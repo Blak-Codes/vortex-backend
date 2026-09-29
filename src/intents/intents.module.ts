@@ -17,6 +17,7 @@ import { SorobanModule } from "../soroban/soroban.module";
 import { AppConfig } from "../config/configuration";
 import { PrismaService } from "../prisma/prisma.service";
 import { GovernanceModule } from "../governance/governance.module";
+import { AbuseModule } from "../abuse/abuse.module";
 
 @Module({
   // Both SolversModule and SorobanModule import IntentsModule back, so both

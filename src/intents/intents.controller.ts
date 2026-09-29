@@ -41,6 +41,8 @@ import { QuoteResponseDto } from "./dto/quote-response.dto";
 import { ListIntentsDto } from "./dto/list-intents.dto";
 import { BatchLookupDto } from "./dto/batch-lookup.dto";
 import { UserThrottlerGuard } from "./user-throttler.guard";
+import { AbuseDetectorGuard } from "../abuse/abuse-detector.guard";
+import { AbuseScoreService } from "../abuse/abuse-score.service";
 import {
   verifyStellarSignature,
   buildAcceptMessage,
@@ -65,6 +67,8 @@ import { KillSwitchOperation } from "../killswitch/killswitch.types";
 import { ConfigService } from "@nestjs/config";
 import { AppConfig } from "../config/configuration";
 import { isCanaryIntent } from "../common/canary";
+import { captureTraceparent, ATTR } from "../tracing";
+import { trace } from "@opentelemetry/api";
 
 @ApiTags("intents")
 @Controller("api/v1/intents")
@@ -76,6 +80,7 @@ export class IntentsController {
     private readonly tokensService: TokensService,
     private readonly routingService: RoutingService,
     private readonly killSwitch: KillSwitchService,
+    private readonly abuseScorer: AbuseScoreService,
     config: ConfigService<AppConfig, true>,
   ) {
     this.canary = new Set(config.get("canaryAddresses", { infer: true }) ?? []);
@@ -240,7 +245,7 @@ export class IntentsController {
    * Issue #45 — additionally throttle per dto.user: 10 creates / 60 s.
    */
   @Post()
-  @UseGuards(UserThrottlerGuard, KillSwitchGuard)
+  @UseGuards(AbuseDetectorGuard, UserThrottlerGuard, KillSwitchGuard)
   @KillSwitchGate({ operation: "create" })
   @ApiTooManyRequestsResponse({
     description:
@@ -296,7 +301,19 @@ export class IntentsController {
       },
       dto.idempotencyKey,
     );
-    this.intentsGateway.broadcast({ type: "intent_created", intent });
+
+    // Attach semantic span attributes and capture traceparent for outbox/job payloads.
+    const activeSpan = trace.getActiveSpan();
+    if (activeSpan) {
+      activeSpan.setAttribute(ATTR.INTENT_ID, intent.intentId);
+      activeSpan.setAttribute(ATTR.INTENT_USER, intent.user);
+      activeSpan.setAttribute(ATTR.INTENT_CHAIN, intent.srcChain);
+      activeSpan.setAttribute(ATTR.INTENT_AMOUNT, intent.srcAmount);
+      activeSpan.setAttribute(ATTR.INTENT_STATE, intent.state);
+    }
+    const traceparent = captureTraceparent();
+
+    this.intentsGateway.broadcast({ type: "intent_created", intent, traceparent });
     return intent;
   }
 
@@ -474,6 +491,7 @@ export class IntentsController {
   }
 
   @Post(":id/cancel")
+  @UseGuards(AbuseDetectorGuard)
   @ApiNotFoundResponse({ description: "Intent not found" })
   @ApiForbiddenResponse({ description: "Unauthorized" })
   @ApiConflictResponse({ description: "Intent is not in open state" })
@@ -498,6 +516,9 @@ export class IntentsController {
 
     // Audit trail (issue #217 / #62): record who cancelled and when.
     this.intentsService.appendAuditEntry(id, "cancelled", dto.user, "user cancelled");
+
+    // Record cancellation for abuse scoring (create/cancel ratio rule).
+    void this.abuseScorer.recordCancel(dto.user.toLowerCase());
 
     this.intentsGateway.broadcast({ type: "intent_cancelled", intentId: id });
     return updated;

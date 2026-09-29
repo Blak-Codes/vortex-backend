@@ -24,6 +24,7 @@ import { JobsModule } from "./jobs/jobs.module";
 import { FlagsModule } from "./flags/flags.module";
 import { GuardianStateModule } from "./governance/guardian-state.service";
 import { DatasetsModule } from "./datasets/datasets.module";
+import { AbuseModule } from "./abuse/abuse.module";
 
 @Module({
   imports: [
@@ -64,6 +65,7 @@ import { DatasetsModule } from "./datasets/datasets.module";
     JobsModule,
     FlagsModule,
     GuardianStateModule,
+    AbuseModule,
     HealthModule,
     TokensModule,
     IntentsModule,
