@@ -81,6 +81,25 @@ function makeConfigService(
       provider: "env",
       refreshIntervalMs: 60000,
       extra: "",
+    ws: {
+      maxPayloadBytes: 16384,
+      maxConnectionsPerIp: 20,
+      trustProxyHops: 0,
+      rateLimitPerSec: 10,
+      rateLimitBurst: 20,
+      rateLimitMaxViolations: 5,
+      outboundQueueMax: 1000,
+      outboundBufferBytes: 1048576,
+      slowConsumerPolicy: "drop_oldest",
+    },
+    authJwtSecret: "",
+    health: {
+      roles: ["api", "ws", "worker"],
+      checkIntervalMs: 5000,
+      readyFailureThreshold: 3,
+      readySuccessThreshold: 2,
+      eventLoopMaxLagMs: 1000,
+      rpcHealthUrls: ["https://soroban-testnet.stellar.org"],
     },
   };
   return {

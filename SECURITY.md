@@ -147,3 +147,30 @@ on this highest-risk subset mandatory, not optional.
 
 If you discover a security vulnerability, please report it privately to the
 maintainers rather than opening a public issue.
+
+## SSRF Protection
+
+All outbound HTTP requests (RPC, Horizon, oracles, webhooks) are routed through `HttpEgressService` which enforces:
+
+- **DNS rebinding protection**: Double DNS resolution to detect IP changes
+- **Private IP blocking**: RFC1918 ranges, loopback, link-local, cloud metadata endpoints
+- **IPv6 support**: Blocks unique local addresses (fc00::/7), link-local (fe80::/10)
+- **Allowlist enforcement**: Per-purpose domain allowlists from config
+- **Redirect validation**: Re-validates redirect targets against allowlist and IP checks
+- **Response size limits**: Prevents memory exhaustion
+- **Timeouts**: Prevents hanging connections
+
+### Bypassing SSRF Protection
+
+**DO NOT** use direct `fetch`, `axios`, or `node-fetch` imports. Always use `HttpEgressService`:
+
+```typescript
+import { HttpEgressService, EgressPurpose } from '@/common/http-egress';
+
+// ✅ Correct
+const egress = new HttpEgressService(config);
+await egress.fetch(url, { purpose: EgressPurpose.RPC });
+
+// ❌ Forbidden - will fail linting
+import fetch from 'node-fetch';
+await fetch(url);

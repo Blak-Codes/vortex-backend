@@ -121,16 +121,36 @@ async function bootstrap() {
   // HSTS is explicitly configured so it is not silently skipped when a TLS
   // terminator sits in front of Express and `req.secure` is false unless the
   // proxy chain is trusted.
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    const isDocsRoute =
+      req.path === "/docs" ||
+      req.path === "/docs-json" ||
+      req.path.startsWith("/docs/");
+
+    if (isDocsRoute) {
+      res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+      res.setHeader("Pragma", "no-cache");
+      res.setHeader("Expires", "0");
+    }
+
+    next();
+  });
+
   app.use(
     helmet({
       contentSecurityPolicy: {
+        useDefaults: true,
         directives: {
           defaultSrc: ["'self'"],
-          // Swagger UI bundles need inline scripts and CDN resources
+          baseUri: ["'self'"],
+          connectSrc: ["'self'"],
+          fontSrc: ["'self'"],
+          frameAncestors: ["'none'"],
+          imgSrc: ["'self'", "data:", "cdn.jsdelivr.net"],
+          objectSrc: ["'none'"],
+          // Swagger UI bundles need inline scripts and CDN resources.
           scriptSrc: ["'self'", "'unsafe-inline'", "cdn.jsdelivr.net"],
           styleSrc: ["'self'", "'unsafe-inline'", "cdn.jsdelivr.net"],
-          imgSrc: ["'self'", "data:", "cdn.jsdelivr.net"],
-          connectSrc: ["'self'"],
         },
       },
       hsts: {
@@ -138,7 +158,10 @@ async function bootstrap() {
         includeSubDomains: true,
         preload: true,
       },
-      // Swagger UI uses inline event handlers; this policy would block it
+      frameguard: { action: "deny" },
+      noSniff: true,
+      referrerPolicy: { policy: "strict-origin-when-cross-origin" },
+      // Swagger UI uses inline event handlers; this policy would block it.
       crossOriginEmbedderPolicy: false,
     }),
   );
@@ -154,7 +177,11 @@ async function bootstrap() {
     .setVersion("0.1.0")
     .build();
   const swaggerDocument = SwaggerModule.createDocument(app, swaggerConfig);
-  SwaggerModule.setup("docs", app, swaggerDocument);
+
+  const shouldServeSwagger = process.env.NODE_ENV !== "production";
+  if (shouldServeSwagger) {
+    SwaggerModule.setup("docs", app, swaggerDocument);
+  }
 
   const configService = app.get(ConfigService<AppConfig, true>);
 

@@ -2,12 +2,15 @@
   "name": "vortex-backend",
   "version": "0.1.0",
   "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
   "license": "MIT",
   "scripts": {
     "dev": "nest start --watch",
     "build": "nest build",
     "start": "node dist/main.js",
-    "lint": "eslint src test scripts tools --ext .ts",
+    "lint": "eslint src test scripts tools packages/solver-sdk/src packages/solver-sdk/examples --ext .ts",
     "typecheck": "tsc --noEmit",
     "test": "jest",
     "test:e2e": "jest --config ./test/jest-e2e.json",

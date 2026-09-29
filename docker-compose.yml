@@ -47,7 +47,9 @@ services:
       DATABASE_URL: postgresql://vortex:vortex@postgres:5432/vortex?schema=public
       CORS_ORIGIN: "*"
       WS_MAX_CONNECTIONS: 1000
-      WS_BACKPLANE: memory
+      # Issue #454 — `WS_BACKPLANE=redis docker compose up` fans WS events out
+      # through the redis service.
+      WS_BACKPLANE: ${WS_BACKPLANE:-memory}
       REDIS_URL: redis://redis:6379
       # Issue #494 — single-process default: this service serves the API and
       # runs queue workers. With the in-memory intents store the store-size

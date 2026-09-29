@@ -155,6 +155,7 @@ export const envValidationSchema = Joi.object({
   // Must be explicitly set to "true" — any other value is treated as false.
   // A startup warning is emitted when this is enabled in production.
   ALLOW_LOCAL_SIGNER_IN_PROD: Joi.boolean().default(false),
+  
   // ── Resource-exhaustion limits (issue #476) ───────────────────────────────
   // These values are consumed by src/config/limits.config.ts at startup and
   // override the compile-time defaults when set.  All have safe defaults so
@@ -277,6 +278,7 @@ export const envValidationSchema = Joi.object({
   // Optional: when empty the monitor reports `contract_unconfigured` rather
   // than silently recording zero divergence.
   SHADOW_SOURCE_ACCOUNT: Joi.string().allow("").default(""),
+  
   // ── Governance parameters contract ────────────────────────────────────────
   // When set, ProtocolParamsService reads current + scheduled protocol
   // parameters (fee bps, fill windows, deadlines, exposure ratio, slash
@@ -287,6 +289,7 @@ export const envValidationSchema = Joi.object({
   // How often (ms) to poll the parameters contract.  30 s is the default;
   // lower values increase RPC load; raise in production if rate-limited.
   PARAMS_POLL_INTERVAL_MS: Joi.number().integer().min(5_000).default(30_000),
+  
   // ── Leader election (issue #493) ──────────────────────────────────────────
   // Controls whether Postgres advisory-lock based leader election is enabled
   // for singleton workers (sweeper, event-ingestion).
@@ -389,4 +392,42 @@ export const envValidationSchema = Joi.object({
   JWT_SIGNING_KEY: Joi.string().allow("").default(""),
   WEBHOOK_SECRET: Joi.string().allow("").default(""),
   CHANNEL_KEY: Joi.string().allow("").default(""),
+  // ── Egress / SSRF Protection (issue #468) ─────────────────────────────────
+  // Controls the centralized HttpEgressService used for all outbound HTTP requests
+  // (RPC, Horizon, oracles, webhooks) to prevent SSRF attacks.
+  EGRESS_TIMEOUT_MS: Joi.number().integer().min(1000).max(60000).default(10000),
+  EGRESS_MAX_REDIRECTS: Joi.number().integer().min(0).max(5).default(3),
+  EGRESS_MAX_BODY_SIZE_BYTES: Joi.number().integer().min(1024).default(10485760), // 10MB
+  SOROBAN_RPC_ALLOWLIST: Joi.string().allow("").default(""),
+  WEBHOOK_ALLOWLIST: Joi.string().allow("").default(""),
+  ORACLE_ALLOWLIST: Joi.string().allow("").default(""),
+});
+  // ── WS gateway hardening (issue #455) ─────────────────────────────────────
+  WS_MAX_PAYLOAD_BYTES: Joi.number().integer().min(1024).default(16384),
+  WS_MAX_CONNECTIONS_PER_IP: Joi.number().integer().min(0).default(20),
+  // Hops of trusted reverse proxies in front of the service. 0 ignores
+  // X-Forwarded-For entirely so clients cannot spoof their IP.
+  WS_TRUST_PROXY_HOPS: Joi.number().integer().min(0).default(0),
+  WS_RATE_LIMIT_PER_SEC: Joi.number().positive().default(10),
+  WS_RATE_LIMIT_BURST: Joi.number().integer().min(1).default(20),
+  WS_RATE_LIMIT_MAX_VIOLATIONS: Joi.number().integer().min(1).default(5),
+  WS_OUTBOUND_QUEUE_MAX: Joi.number().integer().min(1).default(1000),
+  WS_OUTBOUND_BUFFER_BYTES: Joi.number().integer().min(1024).default(1048576),
+  WS_SLOW_CONSUMER_POLICY: Joi.string().valid("drop_oldest", "disconnect").default("drop_oldest"),
+  // HS256 secret shared with the SEP-10 auth endpoint (#442). Empty disables
+  // JWT auth; signature auth keeps working.
+  AUTH_JWT_SECRET: Joi.string().allow("").min(32).default(""),
+
+  // ── Health probes (issue #492) ────────────────────────────────────────────
+  // Comma-separated roles this process serves: api, ws, worker.
+  SERVICE_ROLES: Joi.string()
+    .pattern(/^(api|ws|worker)(,(api|ws|worker))*$/)
+    .default("api,ws,worker"),
+  HEALTH_CHECK_INTERVAL_MS: Joi.number().integer().min(500).default(5000),
+  HEALTH_READY_FAILURE_THRESHOLD: Joi.number().integer().min(1).default(3),
+  HEALTH_READY_SUCCESS_THRESHOLD: Joi.number().integer().min(1).default(2),
+  HEALTH_EVENT_LOOP_MAX_LAG_MS: Joi.number().integer().min(50).default(1000),
+  // Comma-separated Soroban RPC URLs for the RPC-quorum readiness check.
+  // Defaults to SOROBAN_RPC_URL.
+  SOROBAN_RPC_HEALTH_URLS: Joi.string().allow("").default(""),
 });
