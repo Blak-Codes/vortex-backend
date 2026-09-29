@@ -497,7 +497,9 @@ describe("IntentsController (e2e)", () => {
     const res = await request(app.getHttpServer())
       .post("/api/v1/intents/batch")
       .send({ intentIds: [a.intentId, b.intentId, "does-not-exist"] })
-      .expect(201);
+      // 200, not the 201 Nest infers for @Post: this is a read-only lookup
+      // (see @HttpCode on IntentsController.batchLookup).
+      .expect(200);
 
     expect(res.body.count).toBe(2);
     const ids = res.body.intents.map((i: { intentId: string }) => i.intentId).sort();
@@ -508,7 +510,7 @@ describe("IntentsController (e2e)", () => {
     const res = await request(app.getHttpServer())
       .post("/api/v1/intents/batch")
       .send({ intentIds: ["nope-1", "nope-2"] })
-      .expect(201);
+      .expect(200);
 
     expect(res.body).toEqual({ intents: [], count: 0 });
   });

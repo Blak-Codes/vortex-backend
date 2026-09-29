@@ -100,6 +100,9 @@ export function buildDisputeReviewMessage(disputeId: string): string {
  */
 export function buildDisputeDecisionMessage(disputeId: string, resolution: string, reason: string): string {
   return `dispute-decision:${disputeId}:${resolution}:${reason}`;
+}
+
+/**
  * Build the canonical message that a solver must sign to update their mutable
  * profile fields (name / supportedChains / supportedTokens / avgFillTime).
  *

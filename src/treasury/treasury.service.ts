@@ -165,9 +165,11 @@ export class TreasuryService {
       const [code, issuer] = asset.split(":");
       if (issuer) {
         const balance = account.balances.find(
-          (b) => b.asset_type !== "native" && 
-                 b.asset_code === code && 
-                 b.asset_issuer === issuer,
+          (b): b is typeof b & { asset_code: string; asset_issuer: string } =>
+            b.asset_type !== "native" &&
+            "asset_code" in b &&
+            b.asset_code === code &&
+            b.asset_issuer === issuer,
         );
         return {
           asset,
