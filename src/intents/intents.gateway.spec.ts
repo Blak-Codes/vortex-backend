@@ -9,6 +9,8 @@ import { InMemoryIntentsRepository } from "./intents.repository";
 import { logger } from "../common/logger";
 import { buildWsAuthMessage } from "../common/stellar-signature";
 import { ProtocolParamsService } from "../governance/params.service";
+import { IntentCapabilityIndex } from "./solver-intent-matcher";
+import { IntentFeedService } from "./feed/intent-feed.service";
 
 jest.mock("../common/logger", () => ({
   logger: {
@@ -48,10 +50,30 @@ function makeSolversService() {
   } as any;
 }
 
+function makeIntentIndex(intentsService: IntentsService): IntentCapabilityIndex {
+  return new IntentCapabilityIndex(intentsService);
+}
+
+function makeFeed(
+  intentsService: IntentsService,
+  solversService: ReturnType<typeof makeSolversService>,
+  intentIndex: IntentCapabilityIndex,
+  ringBufferCapacity?: number,
+): IntentFeedService {
+  const feed = new IntentFeedService(intentsService, solversService, intentIndex);
+  if (ringBufferCapacity !== undefined) feed.setRingBufferCapacity(ringBufferCapacity);
+  return feed;
+}
+
 function createMockClient() {
   const listeners: Record<string, (...args: unknown[]) => void> = {};
   return {
+    // Real `ws` sockets expose OPEN as an instance property (== 1); ConnectionState
+    // reads `socket.OPEN`, so the double must mirror that or every send is treated
+    // as "not open" and silently dropped.
+    OPEN: 1,
     readyState: 1, // WebSocket.OPEN
+    bufferedAmount: 0,
     send: jest.fn(),
     ping: jest.fn(),
     terminate: jest.fn(),
@@ -134,7 +156,9 @@ describe("IntentsGateway heartbeat", () => {
     jest.clearAllMocks();
     intentsService = makeIntentsService();
     solversService = makeSolversService();
-    gateway = new IntentsGateway(intentsService, solversService);
+    const intentIndex = makeIntentIndex(intentsService);
+    const feed = makeFeed(intentsService, solversService, intentIndex);
+    gateway = new IntentsGateway(intentsService, solversService, intentIndex, feed);
   });
 
   afterEach(() => {
@@ -231,10 +255,17 @@ describe("IntentsGateway heartbeat", () => {
     const signature = keypair.sign(Buffer.from(message, "utf8")).toString("base64");
 
     await client._listeners.message(JSON.stringify({ type: "auth", solver: keypair.publicKey(), timestamp, signature }));
-    expect(client.send).toHaveBeenLastCalledWith(JSON.stringify({ type: "auth_ok" }));
+    // auth_ok is followed by an eligible_snapshot frame, so assert the frame was
+    // sent rather than that it was the final one. ConnectionState passes a flush
+    // callback as a second argument, so match on the payload argument only.
+    expect(client.send.mock.calls.map((c: unknown[]) => c[0])).toContain(
+      JSON.stringify({ type: "auth_ok", method: "signature" }),
+    );
 
     await client._listeners.message(JSON.stringify({ type: "auth", solver: keypair.publicKey(), timestamp, signature: "bad" }));
-    expect(client.send).toHaveBeenLastCalledWith(JSON.stringify({ type: "auth_error", reason: "invalid solver signature" }));
+    expect(client.send.mock.calls.map((c: unknown[]) => c[0])).toContain(
+      JSON.stringify({ type: "auth_error", reason: "invalid solver signature" }),
+    );
   });
 });
 
@@ -250,7 +281,9 @@ describe("IntentsGateway logging", () => {
     jest.clearAllMocks();
     intentsService = makeIntentsService();
     solversService = makeSolversService();
-    gateway = new IntentsGateway(intentsService, solversService);
+    const intentIndex = makeIntentIndex(intentsService);
+    const feed = makeFeed(intentsService, solversService, intentIndex);
+    gateway = new IntentsGateway(intentsService, solversService, intentIndex, feed);
   });
 
   afterEach(() => {
@@ -259,7 +292,8 @@ describe("IntentsGateway logging", () => {
   });
 
   it("logs heartbeat started on construction", () => {
-    expect(logger.info).toHaveBeenCalledWith("ws heartbeat started");
+    // The gateway now logs the backplane mode alongside the heartbeat banner.
+    expect(logger.info).toHaveBeenCalledWith(expect.stringMatching(/^ws heartbeat started/));
   });
 
   it("logs connection with subscriber count", () => {
@@ -283,8 +317,10 @@ describe("IntentsGateway logging", () => {
 
     await gateway.broadcast({ type: "intent_created", intent: { id: "123", secret: "data" } });
 
+    // Sequencing/broadcast logging moved to the transport-agnostic feed service
+    // (issue #433); the log line must not include the event payload.
     expect(logger.debug).toHaveBeenCalledWith(
-      expect.stringMatching(/ws broadcast type=intent_created/),
+      expect.stringMatching(/feed broadcast type=intent_created/),
     );
   });
 
@@ -310,7 +346,10 @@ describe("IntentsGateway — chain subscription filtering (#257)", () => {
     jest.useFakeTimers();
     jest.clearAllMocks();
     intentsService = makeIntentsService();
-    gateway = new IntentsGateway(intentsService, makeSolversService());
+    const solversService = makeSolversService();
+    const intentIndex = makeIntentIndex(intentsService);
+    const feed = makeFeed(intentsService, solversService, intentIndex);
+    gateway = new IntentsGateway(intentsService, solversService, intentIndex, feed);
   });
 
   afterEach(() => {
@@ -467,7 +506,10 @@ describe("IntentsGateway — event replay (#258)", () => {
     jest.useFakeTimers();
     jest.clearAllMocks();
     intentsService = makeIntentsService();
-    gateway = new IntentsGateway(intentsService, makeSolversService());
+    const solversService = makeSolversService();
+    const intentIndex = makeIntentIndex(intentsService);
+    const feed = makeFeed(intentsService, solversService, intentIndex);
+    gateway = new IntentsGateway(intentsService, solversService, intentIndex, feed);
   });
 
   afterEach(() => {
@@ -504,9 +546,10 @@ describe("IntentsGateway — event replay (#258)", () => {
 
   it("returns replay_too_old when fromSeq has been evicted from the buffer", async () => {
     // Use a tiny ring buffer (capacity 2) to force eviction
-    const tinyGateway = new IntentsGateway(intentsService, makeSolversService());
-    // @ts-expect-error – accessing private field for test setup
-    tinyGateway.ringBuffer["capacity"] = 2;
+    const solversService = makeSolversService();
+    const intentIndex = makeIntentIndex(intentsService);
+    const feed = makeFeed(intentsService, solversService, intentIndex, 2);
+    const tinyGateway = new IntentsGateway(intentsService, solversService, intentIndex, feed);
 
     const client = createMockClient();
     tinyGateway.handleConnection(client as unknown as import("ws").WebSocket);
@@ -581,7 +624,9 @@ describe("IntentsGateway — event replay (#258)", () => {
 
     await gateway.broadcast({ type: "test_buffered" });
 
+    // The replay buffer now lives in the transport-agnostic feed service
+    // (issue #433); the gateway delegates replay to it.
     // @ts-expect-error – accessing private for assertion
-    expect(gateway.ringBuffer.size()).toBe(1);
+    expect(gateway.feed.replaySince(0, null as never).events).toHaveLength(1);
   });
 });
