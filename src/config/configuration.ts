@@ -253,6 +253,14 @@ export interface AppConfig {
     storageKind: "local" | "memory";
     localDir: string;
   };
+  secrets: {
+    /** Provider name: "env" | "aws-secrets-manager" | "vault-kv". */
+    provider: "env" | "aws-secrets-manager" | "vault-kv";
+    /** Poll interval for secret rotation (ms). */
+    refreshIntervalMs: number;
+    /** Comma-separated extra secrets: "name:envVar:required". */
+    extra: string;
+  };
 }
 
 export default (): AppConfig => ({
@@ -350,6 +358,11 @@ export default (): AppConfig => ({
     publicBucket: process.env.DATASETS_PUBLIC_BUCKET ?? "vortex-public-datasets",
     storageKind: (process.env.DATASETS_STORAGE ?? "local") as "local" | "memory",
     localDir: process.env.DATASETS_LOCAL_DIR ?? ".datasets",
+  },
+  secrets: {
+    provider: (process.env.SECRETS_PROVIDER ?? "env") as "env" | "aws-secrets-manager" | "vault-kv",
+    refreshIntervalMs: parseInt(process.env.SECRETS_REFRESH_INTERVAL_MS ?? "60000", 10),
+    extra: process.env.SECRETS_EXTRA ?? "",
   },
 });
 

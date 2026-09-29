@@ -77,6 +77,11 @@ function makeConfigService(
       storageKind: "local",
       localDir: ".datasets",
     },
+    secrets: {
+      provider: "env",
+      refreshIntervalMs: 60000,
+      extra: "",
+    },
   };
   return {
     get: (key: string) => {

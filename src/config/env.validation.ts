@@ -370,4 +370,23 @@ export const envValidationSchema = Joi.object({
   DATASETS_PUBLIC_BUCKET: Joi.string().default("vortex-public-datasets"),
   DATASETS_STORAGE: Joi.string().valid("local", "memory").default("local"),
   DATASETS_LOCAL_DIR: Joi.string().default(".datasets"),
+
+  // ── Secrets Manager (issue #465) ────────────────────────────────────────────
+  SECRETS_PROVIDER: Joi.string().valid("env", "aws-secrets-manager", "vault-kv").default("env"),
+  SECRETS_REFRESH_INTERVAL_MS: Joi.number().integer().min(5000).default(60000),
+  SECRETS_EXTRA: Joi.string().allow("").default(""),
+
+  // AWS Secrets Manager
+  AWS_SECRETS_MANAGER_PREFIX: Joi.string().allow("").default(""),
+  AWS_SECRETS_MANAGER_POLL_INTERVAL_MS: Joi.number().integer().min(5000).default(60000),
+
+  // Vault KV
+  VAULT_KV_MOUNT: Joi.string().default("secret"),
+  VAULT_KV_PREFIX: Joi.string().default("vortex/"),
+  VAULT_KV_POLL_INTERVAL_MS: Joi.number().integer().min(5000).default(60000),
+
+  // Extra secret env vars referenced by the default SecretConfig
+  JWT_SIGNING_KEY: Joi.string().allow("").default(""),
+  WEBHOOK_SECRET: Joi.string().allow("").default(""),
+  CHANNEL_KEY: Joi.string().allow("").default(""),
 });
