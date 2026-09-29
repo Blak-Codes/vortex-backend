@@ -1,6 +1,6 @@
 import { Module } from "@nestjs/common";
 import { APP_GUARD } from "@nestjs/core";
-import { ThrottlerModule, ThrottlerGuard } from "@nestjs/throttler";
+import { ThrottlerModule } from "@nestjs/throttler";
 import { ScheduleModule } from "@nestjs/schedule";
 import { ConfigModule } from "./config/config.module";
 import { HealthModule } from "./health/health.module";
@@ -11,23 +11,25 @@ import { SolversModule } from "./solvers/solvers.module";
 import { StatsModule } from "./stats/stats.module";
 import { SorobanModule } from "./soroban/soroban.module";
 import { RoutingModule } from "./routing/routing.module";
-import { MetricsModule } from "./metrics/metrics.module";
 import { KillSwitchModule } from "./killswitch/killswitch.module";
 import { PrismaModule } from "./prisma/prisma.module";
-import { MetricsModule } from "./metrics/metrics.module";
 import { TreasuryModule } from "./treasury/treasury.module";
 import { GovernanceModule } from "./governance/governance.module";
-import { MetricsModule } from "./metrics/metrics.module";
 import { LeaderElectionModule } from "./common/leader-election";
 import { AdminModule } from "./admin/admin.module";
 import { JobsModule } from "./jobs/jobs.module";
 import { FlagsModule } from "./flags/flags.module";
 import { GuardianStateModule } from "./governance/guardian-state.service";
 import { DatasetsModule } from "./datasets/datasets.module";
+import { ApiKeysModule } from "./auth/api-keys/api-keys.module";
+import { TieredThrottleGuard } from "./auth/rate-limit/tiered-throttle.guard";
 
 @Module({
   imports: [
-    // Issue #44 — global rate limit: 100 requests per 60 s per IP
+    // ThrottlerModule stays for the per-user intent guard (#45) and the
+    // per-route @Throttle decorators (quote). The GLOBAL IP throttle it used
+    // to provide is replaced by the tiered, distributed TieredThrottleGuard
+    // (issue #441) — see the APP_GUARD provider below.
     ThrottlerModule.forRoot([
       {
         name: "global",
@@ -39,6 +41,8 @@ import { DatasetsModule } from "./datasets/datasets.module";
     ScheduleModule.forRoot(),
     ConfigModule,
     PrismaModule,
+    // Issue #441 — API key tiers + distributed rate limiting.
+    ApiKeysModule,
     // @Global() — registers MetricsService / MetricsInterceptor / MetricsController
     // for the whole app. Must be imported here or the global providers never
     // become visible to other modules (e.g. IntentsSweeperService).
@@ -46,14 +50,6 @@ import { DatasetsModule } from "./datasets/datasets.module";
     // Emergency pause control plane (issue #477). @Global() so KillSwitchGuard
     // can gate write handlers in any module.
     KillSwitchModule,
-    // MetricsModule registers GET /metrics and the HTTP metrics interceptor.
-    // It is @Global(), so registering it here makes MetricsService injectable
-    // everywhere — which IntentsSweeperService, ShadowService and the SLO
-    // emitters all rely on. It must be listed exactly once, in the root
-    // module: dropping it from here leaves Nest unable to resolve
-    // MetricsService and the application fails to boot.
-    MetricsModule,
-    MetricsModule,
     // Leader election must be initialised before any worker module so that
     // LeaderElectionService is available when workers call registerWorker()
     // in their onModuleInit hooks.
@@ -71,16 +67,19 @@ import { DatasetsModule } from "./datasets/datasets.module";
     StatsModule,
     SorobanModule,
     RoutingModule,
-    MetricsModule,
     TreasuryModule,
     GovernanceModule,
   ],
   controllers: [],
   providers: [
-    // Apply the IP-based throttle globally to every route
+    // Issue #441 — tiered, distributed rate limit replaces the legacy
+    // per-process global IP throttle. Anonymous requests are limited to the
+    // `public` tier (100/min per IP — unchanged); API-key requests are limited
+    // by their tier. Enforced by the Redis-backed DistributedRateLimiter with
+    // a bounded local fallback, so a Redis outage never means unlimited.
     {
       provide: APP_GUARD,
-      useClass: ThrottlerGuard,
+      useClass: TieredThrottleGuard,
     },
   ],
 })

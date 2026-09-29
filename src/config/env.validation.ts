@@ -26,6 +26,7 @@ export const envValidationSchema = Joi.object({
 
   STELLAR_NETWORK: Joi.string().valid("testnet", "futurenet", "mainnet").default("testnet"),
   SOROBAN_RPC_URL: Joi.string().uri().default("https://soroban-testnet.stellar.org"),
+  HORIZON_URL: Joi.string().uri().default("https://horizon-testnet.stellar.org"),
   SETTLEMENT_CONTRACT_ID: Joi.string().allow("").default(""),
   SOLVER_REGISTRY_CONTRACT_ID: Joi.string().allow("").default(""),
   STELLAR_SIGNER_SECRET_KEY: Joi.string().allow("").default(""),
@@ -48,6 +49,10 @@ export const envValidationSchema = Joi.object({
     }),
 
   ONCHAIN_INTENTS_ENABLED: Joi.boolean().default(false),
+
+  // Stellar public key of the treasury account (fee accumulator).
+  TREASURY_ADDRESS: Joi.string().allow("").default(""),
+
   CORS_ORIGIN: Joi.string().default("*"),
   WS_MAX_CONNECTIONS: Joi.number().integer().min(0).default(1000),
   SOROBAN_FEE_PERCENTILE: Joi.string()
@@ -331,6 +336,16 @@ export const envValidationSchema = Joi.object({
     .pattern(/^([A-Za-z0-9_.-]+:(admin|superadmin):[^,:]{16,})(,[A-Za-z0-9_.-]+:(admin|superadmin):[^,:]{16,})*$/)
     .default(""),
 
+  // ── Public anonymised datasets ────────────────────────────────────────────
+  DATASETS_ENABLED: Joi.boolean().default(false),
+  DATASETS_ANONYMIZE: Joi.boolean().default(true),
+  DATASETS_SALT: Joi.string().allow("").default(""),
+  DATASETS_SALT_ROTATION_HOURS: Joi.number().integer().min(1).max(720).default(24),
+  DATASETS_SALT_RETENTION_WINDOWS: Joi.number().integer().min(0).max(30).default(2),
+  DATASETS_PUBLIC_BUCKET: Joi.string().allow("").default(""),
+  DATASETS_STORAGE_KIND: Joi.string().valid("local", "memory").default("memory"),
+  DATASETS_LOCAL_DIR: Joi.string().allow("").default(""),
+
   // ── Guardian emergency ingestion (issue #507) ─────────────────────────────
   GUARDIAN_CONTRACT_ID: Joi.string().allow("").default(""),
 
@@ -348,7 +363,7 @@ export const envValidationSchema = Joi.object({
   SOROBAN_RPC_ALLOWLIST: Joi.string().allow("").default(""),
   WEBHOOK_ALLOWLIST: Joi.string().allow("").default(""),
   ORACLE_ALLOWLIST: Joi.string().allow("").default(""),
-});
+
   // ── WS gateway hardening (issue #455) ─────────────────────────────────────
   WS_MAX_PAYLOAD_BYTES: Joi.number().integer().min(1024).default(16384),
   WS_MAX_CONNECTIONS_PER_IP: Joi.number().integer().min(0).default(20),
@@ -364,6 +379,25 @@ export const envValidationSchema = Joi.object({
   // HS256 secret shared with the SEP-10 auth endpoint (#442). Empty disables
   // JWT auth; signature auth keeps working.
   AUTH_JWT_SECRET: Joi.string().allow("").min(32).default(""),
+
+  // ── Distributed rate limiting (issue #441) ─────────────────────────────────
+  // How often the local rate-limiter fallback prunes expired window entries.
+  // Only relevant during a Redis outage; keeps the fallback map bounded.
+  RATE_LIMIT_LOCAL_PRUNE_MS: Joi.number().integer().min(1000).max(60000).default(60000),
+
+  // Redis URL for the distributed rate limiter (#441). Leave empty to force the
+  // bounded local limiter (the limit is still enforced, per process).
+  RATE_LIMIT_REDIS_URL: Joi.string().allow("").optional(),
+
+  // ── Scoped solver credentials (issue #443) ─────────────────────────────────
+  // Cross-replica transport for credential revocation invalidation.
+  CREDENTIAL_REVOCATION_PUBSUB: Joi.string().valid("memory", "redis").default("memory"),
+
+  // ── SSE intent feed (issue #433) ───────────────────────────────────────────
+  // Heartbeat comment interval and per-client backpressure limit for the
+  // Server-Sent Events intent stream.
+  SSE_HEARTBEAT_MS: Joi.number().integer().min(1000).max(60000).default(15000),
+  SSE_MAX_BUFFER_BYTES: Joi.number().integer().min(1024).default(1048576),
 
   // ── Health probes (issue #492) ────────────────────────────────────────────
   // Comma-separated roles this process serves: api, ws, worker.
