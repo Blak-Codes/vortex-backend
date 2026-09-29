@@ -18,7 +18,8 @@ import configuration, { AppConfig } from "../config/configuration";
 import { verifyHs256Jwt } from "../common/jwt";
 import { Backplane, SequencedEvent, WS_BACKPLANE } from "./backplane/backplane.types";
 import { MemoryBackplane } from "./backplane/memory.backplane";
-import { ConnectionState, resolveClientIp } from "./ws/connection-state";
+import { ConnectionState, resolveClientIp, EncodingFormat } from "./ws/connection-state";
+import { EncodingCache } from "./ws/encoding-cache";
 
 export type { SequencedEvent } from "./backplane/backplane.types";
 
@@ -148,6 +149,13 @@ export class IntentsGateway
   /** Ring buffer storing the last REPLAY_BUFFER_SIZE broadcast events. */
   private readonly ringBuffer = new EventRingBuffer(REPLAY_BUFFER_SIZE);
 
+  /** Encoding cache: serialize once per format, not per client (Activity 1). */
+  private readonly encodingCache = new EncodingCache(REPLAY_BUFFER_SIZE);
+
+  /** Graceful shutdown state (Activity 2). */
+  private draining = false;
+  private drainStartedAt = 0;
+
   constructor(
     private readonly intentsService: IntentsService,
     private readonly solversService: SolversService,
@@ -182,6 +190,8 @@ export class IntentsGateway
   /**
    * Deliver a pre-serialised event payload to every matching subscriber.
    *
+   * Activity 1: Uses encoding cache — serializes once per format, not per client.
+   * 
    * Delivery rules (evaluated in order):
    * 1. Client is not OPEN → skip.
    * 2. Client set wantAll=true → always deliver.
@@ -194,7 +204,7 @@ export class IntentsGateway
    * 5. No filter → full unfiltered feed (backward-compatible default).
    */
   private deliverToMatchingSubscribers(
-    payload: string,
+    seq: number,
     chain: SupportedChain | null,
     event: { type: string; [key: string]: unknown },
   ) {
@@ -203,7 +213,7 @@ export class IntentsGateway
 
       // Opt-out: solver requested full feed.
       if (filter.wantAll) {
-        this.send(client, payload);
+        this.sendEncoded(client, seq, event);
         continue;
       }
 
@@ -217,7 +227,7 @@ export class IntentsGateway
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const matches = solverPredicate.matches(inlinedIntent as any);
           if (matches) {
-            this.send(client, payload);
+            this.sendEncoded(client, seq, event);
             try { this.metricsService?.incWsDelivered(solverPredicate.solverAddress); } catch { /* noop */ }
           } else {
             try { this.metricsService?.incWsFiltered(solverPredicate.solverAddress); } catch { /* noop */ }
@@ -227,27 +237,56 @@ export class IntentsGateway
 
         // State-transition events: the solver already filtered on intent_created,
         // so we pass them through to keep the feed self-consistent.
-        this.send(client, payload);
+        this.sendEncoded(client, seq, event);
         try { this.metricsService?.incWsDelivered(solverPredicate.solverAddress); } catch { /* noop */ }
         continue;
       }
 
       // No filter set → full unfiltered feed (backward-compatible default).
       if (filter.chains === null) {
-        this.send(client, payload);
+        this.sendEncoded(client, seq, event);
         continue;
       }
 
       // Chain couldn't be resolved → deliver to everyone (safe default).
       if (chain === null) {
-        this.send(client, payload);
+        this.sendEncoded(client, seq, event);
         continue;
       }
 
       // Only send if the event's chain is in this subscriber's filter.
       if (filter.chains.has(chain)) {
-        this.send(client, payload);
+        this.sendEncoded(client, seq, event);
       }
+    }
+  }
+
+  /**
+   * Send an event to a client using its negotiated encoding format (Activity 1).
+   * 
+   * Retrieves pre-serialized payload from encoding cache, avoiding redundant
+   * serialization work. At 10k connections with msgpack, this saves 9,999
+   * msgpackEncode() calls per broadcast.
+   */
+  private sendEncoded(client: WebSocket, seq: number, event: Record<string, unknown>): void {
+    const state = this.connections.get(client);
+    if (!state) {
+      // Fallback for connections without state (shouldn't happen)
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(JSON.stringify({ seq, ...event }));
+      }
+      return;
+    }
+
+    const payload = this.encodingCache.get(seq, event, state.encoding);
+    const result = state.send(payload);
+    
+    if (result === "dropped_oldest") {
+      this.metricsService?.wsOutboundDropped.inc();
+    } else if (result === "disconnected") {
+      this.metricsService?.wsSlowConsumerDisconnects.inc();
+      logger.warn(`ws slow consumer disconnected (ip=${state.ip}, queue full)`);
+      this.removeSubscriber(client);
     }
   }
 
@@ -256,8 +295,18 @@ export class IntentsGateway
    * per-IP limit (IP resolved through WS_TRUST_PROXY_HOPS), creates the
    * per-connection state, and accepts an optional solver JWT from
    * `?token=` or `Authorization: Bearer` (anonymous connections stay allowed).
+   * 
+   * Activity 1: Negotiates encoding format via Sec-WebSocket-Protocol header.
+   * Activity 2: Rejects new connections when draining.
    */
   handleConnection(client: WebSocket, request?: IncomingMessage) {
+    // Activity 2: Reject new connections during graceful shutdown
+    if (this.draining) {
+      client.close(1001, "Server draining");
+      this.metricsService?.wsConnectionsRejected.inc({ reason: "draining" });
+      return;
+    }
+
     const ip = resolveClientIp(
       request?.socket?.remoteAddress,
       request?.headers?.["x-forwarded-for"],
@@ -276,19 +325,23 @@ export class IntentsGateway
       return;
     }
 
-    this.connections.set(
+    const state = new ConnectionState(
       client,
-      new ConnectionState(
-        client,
-        ip,
-        { perSec: this.wsConfig.rateLimitPerSec, burst: this.wsConfig.rateLimitBurst },
-        {
-          queueMax: this.wsConfig.outboundQueueMax,
-          bufferBytes: this.wsConfig.outboundBufferBytes,
-          policy: this.wsConfig.slowConsumerPolicy,
-        },
-      ),
+      ip,
+      { perSec: this.wsConfig.rateLimitPerSec, burst: this.wsConfig.rateLimitBurst },
+      {
+        queueMax: this.wsConfig.outboundQueueMax,
+        bufferBytes: this.wsConfig.outboundBufferBytes,
+        policy: this.wsConfig.slowConsumerPolicy,
+      },
     );
+
+    // Activity 1: Negotiate encoding format from Sec-WebSocket-Protocol header
+    const protocols = request?.headers?.["sec-websocket-protocol"];
+    const encoding = this.negotiateEncoding(protocols);
+    state.encoding = encoding;
+
+    this.connections.set(client, state);
     this.connectionsPerIp.set(ip, perIp + 1);
     this.subscribers.set(client, { chains: null, solver: null, wantAll: false, subscriptionCount: 0 });
     this.alive.set(client, true);
@@ -317,6 +370,7 @@ export class IntentsGateway
         type: "connected",
         message: "Vortex intent stream",
         seq: currentSeq,
+        encoding,
       }),
     );
 
@@ -333,7 +387,24 @@ export class IntentsGateway
     const token = IntentsGateway.bearerToken(request);
     if (token) void this.authenticateJwt(client, token);
 
-    logger.info(`ws client connected (subscribers=${this.subscribers.size})`);
+    logger.info(`ws client connected (subscribers=${this.subscribers.size}, encoding=${encoding})`);
+  }
+
+  /**
+   * Negotiate encoding format from Sec-WebSocket-Protocol header (Activity 1).
+   * 
+   * Clients send: `Sec-WebSocket-Protocol: vortex.v1+msgpack`
+   * Server responds with the negotiated protocol in upgrade response.
+   * 
+   * @returns "msgpack" if client requests it, otherwise "json" (default)
+   */
+  private negotiateEncoding(protocols: string | string[] | undefined): EncodingFormat {
+    if (!protocols) return "json";
+    const requested = Array.isArray(protocols) ? protocols : protocols.split(",").map(p => p.trim());
+    if (requested.includes("vortex.v1+msgpack")) {
+      return "msgpack";
+    }
+    return "json";
   }
 
   /** JWT from `?token=` or `Authorization: Bearer` on the upgrade request. */
@@ -838,8 +909,8 @@ export class IntentsGateway
     // Resolve the chain once — shared across all subscriber checks.
     const eventChain = await this.getEventChain(sequencedEvent);
 
-    const payload = JSON.stringify(sequencedEvent);
-    this.deliverToMatchingSubscribers(payload, eventChain, sequencedEvent);
+    // Activity 1: Pass seq + event separately so encoding cache can serialize
+    this.deliverToMatchingSubscribers(seq, eventChain, event);
 
     try {
       this.metricsService?.observeWsDelivery((Date.now() - enqueuedAt) / 1000);
@@ -887,6 +958,14 @@ export class IntentsGateway
     return this.subscribers.size;
   }
 
+  /**
+   * Check if the gateway is draining connections (Activity 2).
+   * Used by health indicators to flip readiness during shutdown.
+   */
+  isDraining(): boolean {
+    return this.draining;
+  }
+
   private heartbeat() {
     for (const [client] of this.subscribers) {
       if (this.alive.get(client) === false) {
@@ -906,11 +985,96 @@ export class IntentsGateway
   }
 
   async onModuleDestroy() {
+    // Activity 2: Graceful shutdown with connection draining
+    await this.startDraining();
+
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     await this.backplane.close();
     for (const [client] of this.subscribers) {
       client.close(1001, "Server shutting down");
       this.removeSubscriber(client);
     }
+  }
+
+  /**
+   * Begin graceful shutdown (Activity 2): notify all clients and close
+   * connections in batches within the termination grace period.
+   * 
+   * Flow:
+   * 1. Set draining flag (rejects new connections)
+   * 2. Send server_draining event to all clients with resumeFrom seq
+   * 3. Close connections in batches with jittered delays
+   * 4. Background workers finish current batch (handled by IntentsSweeperService)
+   * 
+   * Kubernetes terminationGracePeriodSeconds should be at least DRAIN_TIMEOUT_MS + 5s.
+   */
+  async startDraining(): Promise<void> {
+    if (this.draining) return;
+    
+    this.draining = true;
+    this.drainStartedAt = Date.now();
+    
+    const drainTimeoutMs = parseInt(process.env.WS_DRAIN_TIMEOUT_MS ?? "25000", 10);
+    const currentSeq = this.backplane.health().lastSeq;
+    const clientCount = this.subscribers.size;
+
+    logger.warn(`ws draining started: ${clientCount} clients, timeout=${drainTimeoutMs}ms`);
+
+    // Notify all clients to reconnect with resume
+    const drainMessage = JSON.stringify({
+      type: "server_draining",
+      resumeFrom: currentSeq,
+      reconnectAfterMs: this.jitter(1000, 5000), // Stagger reconnects
+      reason: "graceful_shutdown",
+    });
+
+    for (const [client] of this.subscribers) {
+      if (client.readyState === WebSocket.OPEN) {
+        try {
+          client.send(drainMessage);
+        } catch {
+          // Best effort notification
+        }
+      }
+    }
+
+    // Close connections in batches to avoid thundering herd
+    const batchSize = Math.max(10, Math.ceil(clientCount / 10));
+    const clients = Array.from(this.subscribers.keys());
+    const batchDelayMs = Math.floor(drainTimeoutMs / Math.ceil(clientCount / batchSize));
+
+    for (let i = 0; i < clients.length; i += batchSize) {
+      const batch = clients.slice(i, i + batchSize);
+      
+      // Wait between batches
+      if (i > 0) {
+        await this.sleep(batchDelayMs);
+      }
+
+      for (const client of batch) {
+        if (client.readyState === WebSocket.OPEN) {
+          client.close(1001, "Server draining");
+        }
+        this.removeSubscriber(client);
+      }
+
+      logger.info(`ws drain progress: ${Math.min(i + batchSize, clientCount)}/${clientCount} closed`);
+    }
+
+    logger.warn(`ws draining complete: all clients closed`);
+  }
+
+  /**
+   * Generate a jittered delay in [min, max] ms to stagger reconnects.
+   */
+  private jitter(min: number, max: number): number {
+    return Math.floor(Math.random() * (max - min + 1)) + min;
+  }
+
+  /**
+   * Promise-based sleep helper.
+   */
+  private sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
   }
 }
