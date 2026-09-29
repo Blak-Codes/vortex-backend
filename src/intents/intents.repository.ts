@@ -1,7 +1,47 @@
 import { Injectable } from "@nestjs/common";
 import { v4 as uuidv4 } from "uuid";
-import { Intent, IntentState } from "./intents.types";
+import { Intent, IntentState, SupportedChain } from "./intents.types";
 import { buildSeedIntents } from "./intents.seed";
+
+/**
+ * Filter / sort / pagination parameters for advanced intent search (issue #440).
+ *
+ * All fields are optional; when none are present the search returns every
+ * intent sorted by `createdAt` descending — identical to the pre-existing
+ * default behaviour.
+ */
+export interface IntentSearchQuery {
+  state?: IntentState;
+  user?: string;
+  chain?: SupportedChain;
+  /** Minimum USD value at creation (inclusive). */
+  minAmountUsd?: number;
+  /** Maximum USD value at creation (inclusive). */
+  maxAmountUsd?: number;
+  /** Minimum creation time, unix epoch seconds (inclusive). */
+  createdFrom?: number;
+  /** Maximum creation time, unix epoch seconds (inclusive). */
+  createdTo?: number;
+  /** Source token symbol (case-insensitive). */
+  srcToken?: string;
+  /** Destination token symbol (case-insensitive). */
+  dstToken?: string;
+  /** Solver address that accepted/filled the intent. */
+  solver?: string;
+  /**
+   * Sort dimension and direction: `created` | `deadline` | `usd`, optionally
+   * with an `:asc` / `:desc` suffix. Defaults to `created:desc`.
+   */
+  sort?: string;
+  limit?: number;
+  offset?: number;
+}
+
+/** A page of search results plus the total number of matching intents. */
+export interface IntentSearchResult {
+  intents: Intent[];
+  total: number;
+}
 
 /**
  * NestJS injection token for the intents repository.
@@ -48,6 +88,19 @@ export interface IIntentsRepository {
    * Return all intents belonging to the given user (case-insensitive address match).
    */
   findByUser(user: string): Intent[] | Promise<Intent[]>;
+
+  /**
+   * Advanced search with filtering, sorting and pagination (issue #440).
+   *
+   * Filtering and sorting are pushed into the storage adapter (SQL for the
+   * Prisma backend, in-memory for the dev/test backend) so no supported
+   * filter combination requires a full scan in the application layer.
+   *
+   * Returns the requested page plus the total number of matching intents so
+   * the caller can render pagination controls without a second count query'
+   * worth of work when the adapter can serve both from one pass.
+   */
+  search(query: IntentSearchQuery): IntentSearchResult | Promise<IntentSearchResult>;
 
   /**
    * Apply a partial patch to an existing intent and return the updated record.
@@ -186,6 +239,65 @@ export class InMemoryIntentsRepository implements IIntentsRepository {
 
   findByUser(user: string): Intent[] {
     return this.findAll().filter((i) => i.user.toLowerCase() === user.toLowerCase());
+  }
+
+  search(query: IntentSearchQuery): IntentSearchResult {
+    let results = this.findAll();
+
+    if (query.state !== undefined) results = results.filter((i) => i.state === query.state);
+    if (query.user !== undefined) {
+      const needle = query.user.toLowerCase();
+      results = results.filter((i) => i.user.toLowerCase() === needle);
+    }
+    if (query.chain !== undefined) results = results.filter((i) => i.srcChain === query.chain);
+    if (query.solver !== undefined) {
+      const needle = query.solver.toLowerCase();
+      results = results.filter((i) => i.solver !== undefined && i.solver.toLowerCase() === needle);
+    }
+    if (query.minAmountUsd !== undefined) {
+      results = results.filter(
+        (i) => i.usdValueAtCreate !== undefined && i.usdValueAtCreate >= query.minAmountUsd!,
+      );
+    }
+    if (query.maxAmountUsd !== undefined) {
+      results = results.filter(
+        (i) => i.usdValueAtCreate !== undefined && i.usdValueAtCreate <= query.maxAmountUsd!,
+      );
+    }
+    if (query.createdFrom !== undefined) results = results.filter((i) => i.createdAt >= query.createdFrom!);
+    if (query.createdTo !== undefined) results = results.filter((i) => i.createdAt <= query.createdTo!);
+    if (query.srcToken !== undefined) {
+      const needle = query.srcToken.toLowerCase();
+      results = results.filter((i) => i.srcToken.symbol.toLowerCase() === needle);
+    }
+    if (query.dstToken !== undefined) {
+      const needle = query.dstToken.toLowerCase();
+      results = results.filter((i) => i.dstToken.symbol.toLowerCase() === needle);
+    }
+
+    // Sorting — default createdAt desc (preserves pre-existing behaviour).
+    const [dimension, direction] = (query.sort ?? "created:desc").split(":");
+    const dir = direction === "asc" ? 1 : -1;
+    results.sort((a, b) => {
+      switch (dimension) {
+        case "deadline":
+          return (a.deadline - b.deadline) * dir;
+        case "usd": {
+          const av = a.usdValueAtCreate ?? 0;
+          const bv = b.usdValueAtCreate ?? 0;
+          return (av - bv) * dir;
+        }
+        case "created":
+        default:
+          return (a.createdAt - b.createdAt) * dir;
+      }
+    });
+
+    const total = results.length;
+    const offset = query.offset ?? 0;
+    const limit = query.limit ?? 20;
+    const page = results.slice(offset, offset + limit);
+    return { intents: page, total };
   }
 
   update(id: string, patch: Partial<Intent>): Intent | null {

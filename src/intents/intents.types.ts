@@ -106,6 +106,14 @@ export interface Intent {
    * Absent on intents created before issue #500 was deployed.
    */
   paramsVersion?: number;
+  /**
+   * USD value of `srcAmount` at creation time, computed from the resolved
+   * source-token price.  Powers the `minAmountUsd` / `maxAmountUsd` filters
+   * and USD sorting (issue #440).  `undefined` when the token price was
+   * unknown at creation — historical rows are never backfilled with
+   * fabricated values.
+   */
+  usdValueAtCreate?: number;
 }
 
 export interface Quote {

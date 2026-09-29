@@ -9,7 +9,7 @@ import { ConfigService } from "@nestjs/config";
 import { v4 as uuidv4 } from "uuid";
 import { Address, nativeToScVal, xdr } from "@stellar/stellar-sdk";
 import { Intent, IntentAuditEntry, IntentState } from "./intents.types";
-import { INTENTS_REPOSITORY, IIntentsRepository } from "./intents.repository";
+import { INTENTS_REPOSITORY, IIntentsRepository, IntentSearchQuery, IntentSearchResult } from "./intents.repository";
 import { AppConfig } from "../config/configuration";
 import {
   CHAIN_DEADLINE_DEFAULTS,
@@ -50,6 +50,31 @@ function isKnownShadowTransition(transition: ShadowTransition): boolean {
 
 /** How long a completed idempotency-key result stays replayable. */
 const IDEMPOTENCY_TTL_SECONDS = 86_400; // 24 hours
+
+/**
+ * Compute the USD value of a base-unit amount at a given token price (issue #440).
+ *
+ * Uses integer arithmetic for the amount (BigInt) so large base-unit values do
+ * not lose precision before the float conversion; the price is scaled to 1e8
+ * to keep the multiplication in integer space.  Returns `undefined` when the
+ * price is unknown — historical rows are never backfilled with fabricated
+ * values.
+ */
+function computeUsdValue(
+  srcAmount: string,
+  decimals: number,
+  priceUsd: number | undefined,
+): number | undefined {
+  if (priceUsd === undefined || priceUsd === null || !Number.isFinite(priceUsd)) return undefined;
+  try {
+    const amount = BigInt(srcAmount);
+    const scale = 10n ** BigInt(decimals);
+    const scaled = amount * BigInt(Math.round(priceUsd * 1e8));
+    return Number(scaled / (scale * 100_000_000n));
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * Maximum number of simultaneously open (state = "open" | "accepted") intents
@@ -109,6 +134,7 @@ export class IntentsService {
     private readonly configService: ConfigService<AppConfig, true>,
     private readonly stellarTxService: StellarTxService,
     private readonly prisma: PrismaService,
+    private readonly protocolParamsService: ProtocolParamsService,
     /**
      * Shadow-mode divergence monitor (issue #401).
      *
@@ -128,7 +154,6 @@ export class IntentsService {
      * this is always present.
      */
     @Optional() private readonly metricsService?: MetricsService,
-    private readonly protocolParamsService: ProtocolParamsService,
     @Optional() private readonly flags?: FeatureFlagService,
   ) {}
 
@@ -252,6 +277,7 @@ export class IntentsService {
       createdAt: now,
       deadline: defaultDeadline,
       paramsVersion: paramsSnapshot.version,
+      usdValueAtCreate: computeUsdValue(data.srcAmount, data.srcToken.decimals, data.srcToken.priceUSD),
     };
 
     // ONCHAIN_INTENTS_ENABLED is the default; the `onchain-intents-enabled`
@@ -439,6 +465,18 @@ export class IntentsService {
   }
 
   /**
+   * Advanced search with filtering, sorting and pagination (issue #440).
+   *
+   * Delegates to the repository's `search` so the filtering/sorting/pagination
+   * is pushed into the storage adapter (SQL for Prisma, in-memory for the
+   * dev/test backend). When no filters are present the result is identical to
+   * `getAll()` paginated — the default sort is `createdAt` descending.
+   */
+  async search(query: IntentSearchQuery): Promise<IntentSearchResult> {
+    return this.repo.search(query);
+  }
+
+  /**
    * Batch-fetch the current record for each of `ids` (issue #275).
    *
    * IDs are de-duplicated; IDs with no matching record are simply omitted from
@@ -533,9 +571,6 @@ export class IntentsService {
         nativeToScVal(intent.deadline, { type: "u64" }),
       ]),
     );
-    const snapshot = this.protocolParamsService.snapshotForChain(intent.srcChain);
-    const fillWindow = snapshot.fillWindowSeconds;
-    return this.repo.acceptIfOpen(id, solver, nowSec + fillWindow, nowSec);
   }
 
   /**
@@ -653,7 +688,8 @@ export class IntentsService {
       // An "accepted" intent always carries a solver. A record without one is
       // corrupt, so skip the simulation rather than encoding a null address —
       // the sweep loop already logs that case loudly.
-      if (subject?.solver) {
+      const solver = subject?.solver;
+      if (solver && subject) {
         this.reportShadow(
           "slash",
           subject.intentId,
@@ -661,7 +697,7 @@ export class IntentsService {
           "slash_intent",
           this.safeArgs(() => [
             nativeToScVal(subject.intentId, { type: "string" }),
-            new Address(subject.solver).toScVal(),
+            new Address(solver).toScVal(),
             nativeToScVal(patch.slashReason, { type: "string" }),
             nativeToScVal(patch.slashedAt, { type: "u64" }),
           ]),
