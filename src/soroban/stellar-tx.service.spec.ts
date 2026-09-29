@@ -13,6 +13,8 @@ import {
 import { ConfigService } from "@nestjs/config";
 import { StellarTxService, type SimulateContractParams } from "./stellar-tx.service";
 import { SorobanService } from "./soroban.service";
+import { SignerService } from "./signer.service";
+import { TxConfirmationService } from "./tx-confirmation.service";
 import { AppConfig } from "../config/configuration";
 import { KillSwitchService } from "../killswitch/killswitch.service";
 
@@ -82,6 +84,14 @@ describe("StellarTxService", () => {
   /** Default: no pause active, so pre-existing behaviour is unchanged. */
   const notPaused = { paused: false, matched: null, matchedChain: [] };
 
+  /**
+   * `signerService` and `confirmationService` are only touched on the live
+   * submit path; the fee/dry-run/simulation paths exercised here never reach
+   * them, so empty stand-ins keep the constructor honest about its arity.
+   */
+  const unusedSigner = {} as unknown as SignerService;
+  const unusedConfirmation = {} as unknown as TxConfirmationService;
+
   beforeEach(() => {
     sorobanService = {
       getFeeStats: jest.fn(),
@@ -92,6 +102,8 @@ describe("StellarTxService", () => {
     killSwitch = { evaluateTarget: jest.fn().mockReturnValue(notPaused) };
     service = new StellarTxService(
       sorobanService as unknown as SorobanService,
+      unusedSigner,
+      unusedConfirmation,
       configService as unknown as ConfigService<AppConfig, true>,
       killSwitch as unknown as KillSwitchService,
     );
@@ -163,6 +175,8 @@ describe("StellarTxService", () => {
 
       const dryRunService = new StellarTxService(
         sorobanService as unknown as SorobanService,
+        unusedSigner,
+        unusedConfirmation,
         dryRunConfigService,
         killSwitch as unknown as KillSwitchService,
       );
@@ -191,6 +205,12 @@ describe("StellarTxService", () => {
 
       const liveService = new StellarTxService(
         sorobanService as unknown as SorobanService,
+        {
+          // The live path hands the envelope to the signer; this suite only
+          // asserts the dry-run gate releases control to it.
+          withNextSequence: jest.fn().mockRejectedValue(new Error("not yet implemented")),
+        } as unknown as SignerService,
+        unusedConfirmation,
         liveConfigService,
         killSwitch as unknown as KillSwitchService,
       );
@@ -243,7 +263,13 @@ describe("StellarTxService", () => {
       } as unknown as ConfigService<AppConfig, true>;
 
       return {
-        service: new StellarTxService(soroban as unknown as SorobanService, configService),
+        service: new StellarTxService(
+          soroban as unknown as SorobanService,
+          unusedSigner,
+          unusedConfirmation,
+          configService,
+          { evaluateTarget: () => notPaused } as unknown as KillSwitchService,
+        ),
         soroban,
       };
     }
@@ -365,7 +391,7 @@ describe("StellarTxService", () => {
       await service.simulateContract(params());
 
       const [submitted] = soroban.simulateTransaction.mock.calls[0];
-      expect((submitted as Transaction).source.sequenceNumber()).toBe("42");
+      expect((submitted as Transaction).sequence).toBe("42");
       expect(soroban.getLatestLedger).not.toHaveBeenCalled();
     });
 
@@ -378,7 +404,7 @@ describe("StellarTxService", () => {
 
       const [submitted] = soroban.simulateTransaction.mock.calls[0];
       // 500 (latest closed) + 1: the next sequence the account would hold.
-      expect((submitted as Transaction).source.sequenceNumber()).toBe("501");
+      expect((submitted as Transaction).sequence).toBe("501");
     });
 
     it("falls back to sequence 0 when neither the account nor the ledger can be read", async () => {
@@ -391,7 +417,7 @@ describe("StellarTxService", () => {
 
       expect(result.outcome).toBe("ok");
       const [submitted] = soroban.simulateTransaction.mock.calls[0];
-      expect((submitted as Transaction).source.sequenceNumber()).toBe("0");
+      expect((submitted as Transaction).sequence).toBe("0");
     });
 
     it("builds a single, well-formed host-function operation for the named method", async () => {
@@ -402,12 +428,12 @@ describe("StellarTxService", () => {
 
       expect(result.outcome).toBe("ok");
       const [submitted] = soroban.simulateTransaction.mock.calls[0];
-      const envelope = (submitted as Transaction).toEnvelope();
-      expect(envelope.operations()).toHaveLength(1);
+      const tx = submitted as Transaction;
+      expect(tx.operations).toHaveLength(1);
       // Round-trips through XDR, so the host function and every ScVal the
       // monitor built are structurally valid — which is the whole reason the
       // monitor cannot blame a malformed envelope for a "divergence".
-      expect(() => envelope.toXDR()).not.toThrow();
+      expect(() => tx.toXDR()).not.toThrow();
     });
 
     it("sizes the ledger validity window from the worst-case shadow queue drain", async () => {

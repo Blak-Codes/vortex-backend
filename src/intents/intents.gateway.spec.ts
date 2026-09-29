@@ -9,6 +9,43 @@ import { InMemoryIntentsRepository } from "./intents.repository";
 import { logger } from "../common/logger";
 import { buildWsAuthMessage } from "../common/stellar-signature";
 import { ProtocolParamsService } from "../governance/params.service";
+import { IntentCapabilityIndex } from "./solver-intent-matcher";
+import { SolverRecord } from "../solvers/solvers.types";
+
+/**
+ * Full `SolverRecord` stand-in for the WS auth path.
+ *
+ * The gateway compiles a capability predicate from the record, so a bare
+ * `{ address, isActive }` stub would throw on `supportedTokens.map(...)` the
+ * moment auth succeeds and take the whole worker down with it.
+ */
+function makeSolverRecord(address: string, overrides: Partial<SolverRecord> = {}): SolverRecord {
+  return {
+    address,
+    name: "test-solver",
+    bondAmount: "1000",
+    fillsCompleted: 0,
+    fillsFailed: 0,
+    totalVolume: "0",
+    avgFillTime: 0,
+    isActive: true,
+    registeredAt: 0,
+    lastActiveAt: 0,
+    supportedChains: ["ethereum"],
+    supportedTokens: ["USDC"],
+    ...overrides,
+  };
+}
+
+/** Stub capability index: the gateway only reads eligible intents from it. */
+function makeIntentIndex(): IntentCapabilityIndex {
+  return {
+    rebuild: jest.fn().mockResolvedValue(undefined),
+    addIntent: jest.fn(),
+    removeIntent: jest.fn(),
+    getEligibleFor: jest.fn().mockReturnValue([]),
+  } as unknown as IntentCapabilityIndex;
+}
 
 jest.mock("../common/logger", () => ({
   logger: {
@@ -44,7 +81,7 @@ function makeIntentsService(): IntentsService {
 
 function makeSolversService() {
   return {
-    get: jest.fn().mockResolvedValue({ address: "GTEST", isActive: true }),
+    get: jest.fn().mockResolvedValue(makeSolverRecord("GTEST")),
   } as any;
 }
 
@@ -134,7 +171,7 @@ describe("IntentsGateway heartbeat", () => {
     jest.clearAllMocks();
     intentsService = makeIntentsService();
     solversService = makeSolversService();
-    gateway = new IntentsGateway(intentsService, solversService);
+    gateway = new IntentsGateway(intentsService, solversService, makeIntentIndex());
   });
 
   afterEach(() => {
@@ -223,7 +260,7 @@ describe("IntentsGateway heartbeat", () => {
     const keypair = Keypair.random();
     const client = createMockClient();
     const timestamp = Math.floor(Date.now() / 1000);
-    solversService.get = jest.fn().mockResolvedValue({ address: keypair.publicKey(), isActive: true });
+    solversService.get = jest.fn().mockResolvedValue(makeSolverRecord(keypair.publicKey()));
 
     gateway.handleConnection(client as unknown as import("ws").WebSocket);
 
@@ -250,7 +287,7 @@ describe("IntentsGateway logging", () => {
     jest.clearAllMocks();
     intentsService = makeIntentsService();
     solversService = makeSolversService();
-    gateway = new IntentsGateway(intentsService, solversService);
+    gateway = new IntentsGateway(intentsService, solversService, makeIntentIndex());
   });
 
   afterEach(() => {
@@ -310,7 +347,7 @@ describe("IntentsGateway — chain subscription filtering (#257)", () => {
     jest.useFakeTimers();
     jest.clearAllMocks();
     intentsService = makeIntentsService();
-    gateway = new IntentsGateway(intentsService, makeSolversService());
+    gateway = new IntentsGateway(intentsService, makeSolversService(), makeIntentIndex());
   });
 
   afterEach(() => {
@@ -467,7 +504,7 @@ describe("IntentsGateway — event replay (#258)", () => {
     jest.useFakeTimers();
     jest.clearAllMocks();
     intentsService = makeIntentsService();
-    gateway = new IntentsGateway(intentsService, makeSolversService());
+    gateway = new IntentsGateway(intentsService, makeSolversService(), makeIntentIndex());
   });
 
   afterEach(() => {
@@ -504,7 +541,7 @@ describe("IntentsGateway — event replay (#258)", () => {
 
   it("returns replay_too_old when fromSeq has been evicted from the buffer", async () => {
     // Use a tiny ring buffer (capacity 2) to force eviction
-    const tinyGateway = new IntentsGateway(intentsService, makeSolversService());
+    const tinyGateway = new IntentsGateway(intentsService, makeSolversService(), makeIntentIndex());
     // @ts-expect-error – accessing private field for test setup
     tinyGateway.ringBuffer["capacity"] = 2;
 

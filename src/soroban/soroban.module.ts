@@ -1,5 +1,4 @@
 import { forwardRef, Module } from "@nestjs/common";
-import { Module, forwardRef } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { EventIngestionService } from "./event-ingestion.service";
 import { ShadowController } from "./shadow.controller";
@@ -16,30 +15,18 @@ import { SolversModule } from "../solvers/solvers.module";
 import { MetricsService } from "../metrics/metrics.service";
 import { AppConfig } from "../config/configuration";
 import { IntentsModule } from "../intents/intents.module";
-import { SolversModule } from "../solvers/solvers.module";
-import { IntentsModule } from "../intents/intents.module";
 
 // MetricsModule is @Global() and registered in AppModule, so the MetricsService
 // that ShadowService emits its counters through needs no import here.
 @Module({
   // SorobanModule <-> SolversModule <-> IntentsModule (which imports this
-  // module) form a CommonJS cycle. SolversModule must be resolved lazily so
-  // that evaluating this file never triggers IntentsModule's module decorator
-  // while SorobanModule is still partially initialised.
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  imports: [forwardRef(() => require("../solvers/solvers.module").SolversModule)],
-  imports: [forwardRef(() => SolversModule)],
+  // module) form a CommonJS cycle, so both sides are wrapped in forwardRef.
   // IntentsModule → SorobanModule (IntentsService submits settlement writes)
   // and SorobanModule → IntentsModule (EventIngestionService reconciles
-  // intents from on-chain events). The cycle is broken with forwardRef.
-  // SolversModule supplies SolversService to EventIngestionService and, via
-  // IntentsModule, also participates in the cycle — so it is deferred too.
+  // intents from on-chain events). SolversModule supplies SolversService to
+  // EventIngestionService and, via IntentsModule, also participates in the
+  // cycle — so it is deferred too.
   imports: [forwardRef(() => IntentsModule), forwardRef(() => SolversModule)],
-  controllers: [SorobanController],
-  // `forwardRef` is required on both sides: EventIngestionService reads an
-  // Intent back to date its confirmation metric, so SorobanModule needs
-  // IntentsModule, and IntentsModule already needs ShadowService from here.
-  imports: [forwardRef(() => IntentsModule), SolversModule],
   controllers: [SorobanController, ShadowController],
   providers: [
     SorobanService,

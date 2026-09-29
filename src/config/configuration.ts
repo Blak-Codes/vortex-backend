@@ -171,6 +171,7 @@ export interface AppConfig {
      * comfortably under the 5 s propagation requirement.
      */
     pollMs: number;
+  };
   /**
    * Shadow-mode divergence monitor (issue #401).
    *
@@ -195,6 +196,7 @@ export interface AppConfig {
      * `contract_unconfigured` rather than as zero divergence.
      */
     sourceAccount: string;
+  };
   governance: {
     /**
      * On-chain governance / parameters contract ID.
@@ -208,6 +210,7 @@ export interface AppConfig {
      * Default: 30 000 ms (30 s).
      */
     paramsPollIntervalMs: number;
+  };
   leaderElection: {
     /** When false, all workers run unconditionally (pre-election behaviour). */
     enabled: boolean;
@@ -239,6 +242,17 @@ export interface AppConfig {
   guardianContractId: string;
   /** Addresses (users and solvers) owned by the synthetic canary (issue #496). */
   canaryAddresses: string[];
+  /** Public anonymised dataset publication settings (see docs/rfcs/0001). */
+  datasets: {
+    enabled: boolean;
+    anonymize: boolean;
+    salt: string;
+    saltRotationHours: number;
+    saltRetentionWindows: number;
+    publicBucket: string;
+    storageKind: "local" | "memory";
+    localDir: string;
+  };
 }
 
 export default (): AppConfig => ({
@@ -292,6 +306,7 @@ export default (): AppConfig => ({
     // 2000 ms + request latency stays well inside the 5 s propagation budget
     // even when Redis is unavailable.
     pollMs: parseInt(process.env.KILLSWITCH_POLL_MS ?? "2000", 10),
+  },
   shadow: {
     // Off by default: the monitor costs one simulation per sampled transition,
     // so it is opt-in per environment rather than something a deployer
@@ -301,9 +316,11 @@ export default (): AppConfig => ({
     queueMax: clampPositiveInt(process.env.SHADOW_QUEUE_MAX, 256),
     concurrency: clampPositiveInt(process.env.SHADOW_CONCURRENCY, 4),
     sourceAccount: process.env.SHADOW_SOURCE_ACCOUNT ?? "",
+  },
   governance: {
     paramsContractId: process.env.PARAMS_CONTRACT_ID ?? "",
     paramsPollIntervalMs: parseInt(process.env.PARAMS_POLL_INTERVAL_MS ?? "30000", 10),
+  },
   leaderElection: {
     enabled: (process.env.LEADER_ELECTION_ENABLED ?? "false") === "true",
     heartbeatMs: parseInt(process.env.LEADER_ELECTION_HEARTBEAT_MS ?? "5000", 10),
@@ -324,6 +341,16 @@ export default (): AppConfig => ({
     .split(",")
     .map((a) => a.trim())
     .filter(Boolean),
+  datasets: {
+    enabled: (process.env.DATASETS_ENABLED ?? "false") === "true",
+    anonymize: (process.env.DATASETS_ANONYMIZE ?? "true") === "true",
+    salt: process.env.DATASETS_SALT ?? "",
+    saltRotationHours: parseInt(process.env.DATASETS_SALT_ROTATION_HOURS ?? "24", 10),
+    saltRetentionWindows: parseInt(process.env.DATASETS_SALT_RETENTION_WINDOWS ?? "2", 10),
+    publicBucket: process.env.DATASETS_PUBLIC_BUCKET ?? "vortex-public-datasets",
+    storageKind: (process.env.DATASETS_STORAGE ?? "local") as "local" | "memory",
+    localDir: process.env.DATASETS_LOCAL_DIR ?? ".datasets",
+  },
 });
 
 /** Parse `SHADOW_SAMPLE_RATE` into a probability, defaulting to full sampling. */

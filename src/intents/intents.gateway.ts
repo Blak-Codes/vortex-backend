@@ -310,8 +310,12 @@ export class IntentsGateway
   }
 
   handleConnection(client: WebSocket) {
-    this.subscribers.set(client, { chains: null, solver: null, wantAll: false });
-    this.subscribers.set(client, { chains: null, subscriptionCount: 0 });
+    this.subscribers.set(client, {
+      chains: null,
+      solver: null,
+      wantAll: false,
+      subscriptionCount: 0,
+    });
     this.alive.set(client, true);
     this.metricsService?.incWsConnection();
 
@@ -443,7 +447,12 @@ export class IntentsGateway
   private handleSubscribe(client: WebSocket, msg: Record<string, unknown>): void {
     // all=true: opt out of capability filtering.
     if (msg.all === true) {
-      const existing = this.subscribers.get(client) ?? { chains: null, solver: null, wantAll: false };
+      const existing = this.subscribers.get(client) ?? {
+        chains: null,
+        solver: null,
+        wantAll: false,
+        subscriptionCount: 0,
+      };
       this.subscribers.set(client, { ...existing, wantAll: true });
       logger.debug("ws client opted out of capability filtering (all=true)");
       if (client.readyState === WebSocket.OPEN) {
@@ -506,7 +515,6 @@ export class IntentsGateway
         typeof c === "string" && (SUPPORTED_CHAINS as readonly string[]).includes(c),
     );
 
-    this.subscribers.set(client, { chains: new Set(validChains), solver: null, wantAll: false });
     filter.chains = new Set(validChains);
     filter.subscriptionCount += 1;
 
@@ -622,7 +630,13 @@ export class IntentsGateway
     // Build capability predicate and store it on the connection.
     const predicate = buildMatchPredicate(solverRecord);
     this.authenticatedSolver.set(client, solver);
-    this.subscribers.set(client, { chains: null, solver: predicate, wantAll: false });
+    const authFilter = this.subscribers.get(client);
+    this.subscribers.set(client, {
+      chains: authFilter?.chains ?? null,
+      solver: predicate,
+      wantAll: authFilter?.wantAll ?? false,
+      subscriptionCount: authFilter?.subscriptionCount ?? 0,
+    });
 
     client.send(JSON.stringify({ type: "auth_ok" }));
 

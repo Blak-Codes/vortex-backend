@@ -28,8 +28,8 @@ import { GovernanceModule } from "../governance/governance.module";
     RoutingModule,
     TokensModule,
     forwardRef(() => SorobanModule),
+    GovernanceModule,
   ],
-  imports: [forwardRef(() => SolversModule), RoutingModule, TokensModule, SorobanModule, GovernanceModule],
   controllers: [IntentsController],
   providers: [
     // Select the persistence adapter based on INTENTS_PERSISTENCE env var.

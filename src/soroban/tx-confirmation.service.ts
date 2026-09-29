@@ -87,8 +87,9 @@ export class TxConfirmationService {
         return { hash, status: "SUCCESS", response, durationMs };
       }
 
-      // FAILED
-      const errorDetail = (response as { resultXdr?: string }).resultXdr ?? "unknown";
+      // FAILED: `response` is narrowed to the failed variant, whose `resultXdr`
+      // is a decoded xdr.TransactionResult (not a string).
+      const errorDetail = response.resultXdr.result().switch().name;
       this.logger.warn(
         `[tx-confirmation] FAILED hash=${hash} durationMs=${durationMs} detail=${errorDetail}`,
       );

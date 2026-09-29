@@ -34,6 +34,8 @@ export class MetricsService implements OnModuleInit {
   public readonly shadowDivergences: client.Counter<string>;
   public readonly shadowDropped: client.Counter<string>;
   public readonly shadowQueueDepth: client.Gauge<string>;
+
+  /**
    * Leader election metrics (issue #493).
    * Track which replica is leader per worker and how often leadership changes.
    */
@@ -211,6 +213,9 @@ export class MetricsService implements OnModuleInit {
       name: `${prefix}solver_registry_events_total`,
       help: "Solver-registry contract events ingested by type",
       labelNames: ["event_type"],
+      registers: [this.register],
+    });
+
     // ── Shadow-mode divergence monitor (issue #401) ──────────────────────────
     this.shadowComparisons = new client.Counter({
       name: `${prefix}shadow_comparisons_total`,
@@ -235,6 +240,9 @@ export class MetricsService implements OnModuleInit {
     this.shadowQueueDepth = new client.Gauge({
       name: `${prefix}shadow_queue_depth`,
       help: "Current number of queued shadow-mode observations awaiting simulation",
+      registers: [this.register],
+    });
+
     // ── Leader election metrics (issue #493) ─────────────────────────────────
     this.leaderElectionIsLeader = new client.Gauge({
       name: `${prefix}leader_election_is_leader`,
@@ -399,6 +407,8 @@ export class MetricsService implements OnModuleInit {
 
   incSolverRegistryEvent(eventType: string): void {
     this.solverRegistryEventsTotal.inc({ event_type: eventType });
+  }
+
   /**
    * Record one resolved shadow-mode comparison (issue #401).
    *
@@ -430,6 +440,9 @@ export class MetricsService implements OnModuleInit {
   /** Publish the current shadow queue depth. */
   setShadowQueueDepth(depth: number): void {
     this.shadowQueueDepth.set(depth);
+  }
+
+  /**
    * Record that this replica acquired leadership for `workerName`.
    * Sets the is_leader gauge to 1 and increments the acquisition counter.
    */

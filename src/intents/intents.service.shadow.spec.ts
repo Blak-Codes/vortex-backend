@@ -5,6 +5,7 @@ import { MetricsService } from "../metrics/metrics.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { ShadowService, type ShadowObservationRequest } from "../soroban/shadow.service";
 import { StellarTxService } from "../soroban/stellar-tx.service";
+import { ProtocolParamsService } from "../governance/params.service";
 import { IntentsService } from "./intents.service";
 import { InMemoryIntentsRepository } from "./intents.repository";
 
@@ -42,6 +43,19 @@ function fakePrismaService(): PrismaService {
   } as unknown as PrismaService;
 }
 
+/** Protocol params are not what this file observes — a static snapshot suffices. */
+function fakeProtocolParamsService(): ProtocolParamsService {
+  return {
+    snapshotForChain: jest.fn().mockReturnValue({
+      version: 0,
+      feeBps: 30,
+      deadlineSeconds: 1800,
+      fillWindowSeconds: 600,
+      capturedAt: new Date().toISOString(),
+    }),
+  } as unknown as ProtocolParamsService;
+}
+
 /**
  * Minimal stand-in for the monitor.
  *
@@ -74,6 +88,7 @@ function makeService(options: { accepts?: boolean } = {}): Harness {
     fakeConfig(),
     fakeStellarTxService(),
     fakePrismaService(),
+    fakeProtocolParamsService(),
     shadow as unknown as ShadowService,
     metrics,
   );

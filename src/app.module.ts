@@ -11,13 +11,10 @@ import { SolversModule } from "./solvers/solvers.module";
 import { StatsModule } from "./stats/stats.module";
 import { SorobanModule } from "./soroban/soroban.module";
 import { RoutingModule } from "./routing/routing.module";
-import { MetricsModule } from "./metrics/metrics.module";
 import { KillSwitchModule } from "./killswitch/killswitch.module";
 import { PrismaModule } from "./prisma/prisma.module";
-import { MetricsModule } from "./metrics/metrics.module";
 import { TreasuryModule } from "./treasury/treasury.module";
 import { GovernanceModule } from "./governance/governance.module";
-import { MetricsModule } from "./metrics/metrics.module";
 import { LeaderElectionModule } from "./common/leader-election";
 import { AdminModule } from "./admin/admin.module";
 import { JobsModule } from "./jobs/jobs.module";
@@ -40,20 +37,13 @@ import { DatasetsModule } from "./datasets/datasets.module";
     ConfigModule,
     PrismaModule,
     // @Global() — registers MetricsService / MetricsInterceptor / MetricsController
-    // for the whole app. Must be imported here or the global providers never
-    // become visible to other modules (e.g. IntentsSweeperService).
+    // for the whole app. Must be imported once in the root module or the global
+    // providers never become visible to other modules (e.g. IntentsSweeperService)
+    // and Nest fails to resolve MetricsService at boot.
     MetricsModule,
     // Emergency pause control plane (issue #477). @Global() so KillSwitchGuard
     // can gate write handlers in any module.
     KillSwitchModule,
-    // MetricsModule registers GET /metrics and the HTTP metrics interceptor.
-    // It is @Global(), so registering it here makes MetricsService injectable
-    // everywhere — which IntentsSweeperService, ShadowService and the SLO
-    // emitters all rely on. It must be listed exactly once, in the root
-    // module: dropping it from here leaves Nest unable to resolve
-    // MetricsService and the application fails to boot.
-    MetricsModule,
-    MetricsModule,
     // Leader election must be initialised before any worker module so that
     // LeaderElectionService is available when workers call registerWorker()
     // in their onModuleInit hooks.
@@ -71,7 +61,6 @@ import { DatasetsModule } from "./datasets/datasets.module";
     StatsModule,
     SorobanModule,
     RoutingModule,
-    MetricsModule,
     TreasuryModule,
     GovernanceModule,
   ],

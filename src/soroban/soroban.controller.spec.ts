@@ -22,7 +22,10 @@ describe("SorobanController", () => {
   let controller: SorobanController;
 
   beforeEach(async () => {
-    jest.clearAllMocks();
+    // `reset`, not `clear`: `mockResolvedValueOnce` queues survive
+    // `clearAllMocks`, so a leftover one-shot from the previous test would be
+    // served before the rejection this test installs.
+    jest.resetAllMocks();
 
     const module: TestingModule = await Test.createTestingModule({
       controllers: [SorobanController],
@@ -111,7 +114,6 @@ describe("SorobanController", () => {
   // -------------------------------------------------------------------------
 
   describe("getAccount", () => {
-    const PUBLIC_KEY = "GA6NGB7335VYC4CEHUN6KZD2NNESU36BKCL5LZCTTY6ICW5ZVII67FF4";
     // Real strkeys (valid CRC16). A well-formed-looking "G…" string with a bad
     // checksum is rejected by the controller, so fixtures must be genuine.
     const PUBLIC_KEY = "GAMS2CGT4CPVYB5LSZV3FAOYFJK67574RS5HASJNTNS7WEUO3CN6ADW4";

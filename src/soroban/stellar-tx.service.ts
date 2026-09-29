@@ -30,15 +30,12 @@ import { Injectable, Logger, Optional } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import {
   Account,
-  Address,
   BASE_FEE,
   Contract,
   FeeBumpTransaction,
   Operation,
   SorobanDataBuilder,
-  nativeToScVal,
   Networks,
-  Operation,
   SorobanRpc,
   Transaction,
   TransactionBuilder,
@@ -161,8 +158,8 @@ export class StellarTxService {
     private readonly signerService: SignerService,
     private readonly confirmationService: TxConfirmationService,
     configService: ConfigService<AppConfig, true>,
-    @Optional() private readonly metricsService?: MetricsService,
     private readonly killSwitch: KillSwitchService,
+    @Optional() private readonly metricsService?: MetricsService,
     @Optional() private readonly flags?: FeatureFlagService,
   ) {
     this.feePercentile = configService.get("stellar.feePercentile", { infer: true });
@@ -493,6 +490,9 @@ export class StellarTxService {
       }
       throw err;
     }
+  }
+
+  /**
    * Simulates a contract invocation **without ever submitting it** (issue #401).
    *
    * This is the only RPC call the shadow-mode divergence monitor is allowed to
@@ -599,29 +599,27 @@ export class StellarTxService {
   ): Promise<Transaction> {
     const baseFee = await this.estimateBaseFee();
     const sequence = await this.resolveSimulationSequence(sourceAccount);
-    const contract = Address.fromString(params.contractId);
 
-    return new TransactionBuilder(new Account(sourceAccount, sequence), {
+    // `TransactionBuilder` emits `source.sequenceNumber() + 1` as the envelope's
+    // seqNum, so the account handed to it must sit one *below* the sequence the
+    // envelope should carry; passing `sequence` straight through would shift
+    // every envelope (42 -> 43, 501 -> 502, 0 -> 1).
+    const sourceSequence = (BigInt(sequence) - 1n).toString();
+
+    // Pin both ends of the window: `simulationTimeoutSeconds` sizes the
+    // *width* (worst-case queue drain), not "seconds from now", so the
+    // envelope does not silently stay valid for `now + window` seconds.
+    const now = Math.floor(Date.now() / 1000);
+
+    return new TransactionBuilder(new Account(sourceAccount, sourceSequence), {
       fee: baseFee,
       networkPassphrase: this.networkPassphrase,
     })
-      .addOperation(
-        Operation.invokeHostFunction({
-          func: xdr.HostFunctionType.hostFunctionTypeInvokeContract,
-          args: [
-            contract.toScAddress(),
-            // The method name is a symbol in the Soroban ABI, not a string.
-            nativeToScVal(params.method, { type: "symbol" }),
-            params.args,
-            // Token the call is denominated in. `native` is XLM; the settlement
-            // contract's own token is a distinct `ScAddress` entry point. The
-            // value is irrelevant to a simulation, but it must be a well-formed
-            // ScVal for the envelope to decode.
-            nativeToScVal("native", { type: "symbol" }),
-          ],
-        }),
-      )
-      .setTimeout(this.simulationTimeoutSeconds)
+      // Same envelope shape as `invokeContract` builds for the live path —
+      // the monitor is only useful if it simulates the call the chain would
+      // actually receive.
+      .addOperation(new Contract(params.contractId).call(params.method, ...params.args))
+      .setTimebounds(now, now + this.simulationTimeoutSeconds)
       .build();
   }
 

@@ -26,6 +26,8 @@ export const envValidationSchema = Joi.object({
 
   STELLAR_NETWORK: Joi.string().valid("testnet", "futurenet", "mainnet").default("testnet"),
   SOROBAN_RPC_URL: Joi.string().uri().default("https://soroban-testnet.stellar.org"),
+  // Horizon base URL, used for account/balance reads (treasury, canary tooling).
+  HORIZON_URL: Joi.string().uri().default("https://horizon-testnet.stellar.org"),
   SETTLEMENT_CONTRACT_ID: Joi.string().allow("").default(""),
   SOLVER_REGISTRY_CONTRACT_ID: Joi.string().allow("").default(""),
   STELLAR_SIGNER_SECRET_KEY: Joi.string().allow("").default(""),
@@ -48,6 +50,8 @@ export const envValidationSchema = Joi.object({
     }),
 
   ONCHAIN_INTENTS_ENABLED: Joi.boolean().default(false),
+  // Stellar public key of the treasury account (fee/slash/refund accumulator).
+  TREASURY_ADDRESS: Joi.string().allow("").default(""),
   CORS_ORIGIN: Joi.string().default("*"),
   WS_MAX_CONNECTIONS: Joi.number().integer().min(0).default(1000),
   SOROBAN_FEE_PERCENTILE: Joi.string()
@@ -335,4 +339,35 @@ export const envValidationSchema = Joi.object({
   // Comma-separated canary user/solver addresses, excluded from public stats
   // and leaderboards.
   CANARY_ADDRESSES: Joi.string().allow("").default(""),
+
+  // ── Public anonymised datasets (docs/rfcs/0001) ───────────────────────────
+  DATASETS_ENABLED: Joi.boolean().default(false),
+  DATASETS_ANONYMIZE: Joi.boolean().default(true),
+  // Required only when datasets are enabled AND anonymisation is on — an
+  // empty/weak salt would collapse pseudonymisation to a fixed, reversible
+  // transform.  It stays optional (default "") otherwise so existing dev/test
+  // configs are unaffected.
+  DATASETS_SALT: Joi.string()
+    .when("DATASETS_ENABLED", {
+      is: true,
+      then: Joi.string().when("DATASETS_ANONYMIZE", {
+        is: true,
+        then: Joi.string()
+          .min(32)
+          .required()
+          .messages({
+            "any.required":
+              "DATASETS_SALT must be set when DATASETS_ENABLED=true and DATASETS_ANONYMIZE=true. " +
+              "Generate a strong random secret (e.g. `openssl rand -hex 32`).",
+            "string.min": "DATASETS_SALT must be at least 32 characters.",
+          }),
+        otherwise: Joi.string().allow("").default(""),
+      }),
+      otherwise: Joi.string().allow("").default(""),
+    }),
+  DATASETS_SALT_ROTATION_HOURS: Joi.number().integer().min(1).default(24),
+  DATASETS_SALT_RETENTION_WINDOWS: Joi.number().integer().min(0).default(2),
+  DATASETS_PUBLIC_BUCKET: Joi.string().default("vortex-public-datasets"),
+  DATASETS_STORAGE: Joi.string().valid("local", "memory").default("local"),
+  DATASETS_LOCAL_DIR: Joi.string().default(".datasets"),
 });

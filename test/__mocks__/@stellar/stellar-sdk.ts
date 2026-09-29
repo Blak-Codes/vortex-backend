@@ -1,16 +1,3 @@
-import * as path from "path";
-
-// The e2e moduleNameMapper maps the bare specifier "^@stellar/stellar-sdk$" to
-// this file (jest.requireActual still goes through moduleNameMapper, so it
-// cannot be used here). Resolve the real package entry by absolute path
-// instead — an absolute path does not match the mapper regex, so the genuine
-// SDK is loaded and re-exported below (only SorobanRpc.Server is replaced).
-/* eslint-disable @typescript-eslint/no-var-requires */
-const actual = require(path.resolve(
-  __dirname,
-  "../../../node_modules/@stellar/stellar-sdk/lib/index.js",
-)) as typeof import("@stellar/stellar-sdk");
-/* eslint-enable @typescript-eslint/no-var-requires */
 /**
  * Hermetic test double for `@stellar/stellar-sdk`.
  *
@@ -72,22 +59,13 @@ const mockServer = {
 
 const mockServerClass = jest.fn().mockImplementation(() => mockServer);
 
-module.exports = {
-  ...actual,
-  SorobanRpc: {
-    ...actual.SorobanRpc,
-    Server: mockServerClass,
-  },
-  rpc: {
-    ...actual.rpc,
-    Server: mockServerClass,
 /**
  * Network stub. `Api` is spread from the real module so type guards such as
  * `SorobanRpc.Api.isSimulationError` keep working exactly as in production.
  */
 export const SorobanRpc = {
   ...real.SorobanRpc,
-  Server: jest.fn().mockImplementation(() => mockServer),
+  Server: mockServerClass,
   Api: {
     ...real.SorobanRpc?.Api,
     isSimulationError: (response: unknown): boolean =>
@@ -109,6 +87,8 @@ export const Keypair = real.Keypair;
 export const Networks = real.Networks;
 export const StrKey = real.StrKey;
 export const Address = real.Address;
+export const Asset = real.Asset;
+export const Horizon = real.Horizon;
 export const Contract = real.Contract;
 export const Account = real.Account;
 export const Operation = real.Operation;

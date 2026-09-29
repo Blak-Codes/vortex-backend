@@ -83,7 +83,12 @@ export function buildSolverStatusMessage(action: "deactivate" | "reactivate" | "
 
 /**
  * Build the canonical message that a solver must sign to update its own
- * mutable profile fields (issue #273 — `PATCH /api/v1/solvers/:address`).
+ * mutable profile fields (name / supportedChains / supportedTokens /
+ * avgFillTime — issue #273, `PATCH /api/v1/solvers/:address`).
+ *
+ * Signing over just the address is sufficient here: it proves control of the
+ * account whose profile is being edited, and the request body is already
+ * constrained by the DTO whitelist so no immutable field can ride along.
  */
 export function buildUpdateSolverMessage(address: string): string {
   return `update-solver:${address}`;
@@ -108,13 +113,4 @@ export function buildDisputeReviewMessage(disputeId: string): string {
  */
 export function buildDisputeDecisionMessage(disputeId: string, resolution: string, reason: string): string {
   return `dispute-decision:${disputeId}:${resolution}:${reason}`;
- * Build the canonical message that a solver must sign to update their mutable
- * profile fields (name / supportedChains / supportedTokens / avgFillTime).
- *
- * Signing over just the address is sufficient here: it proves control of the
- * account whose profile is being edited, and the request body is already
- * constrained by the DTO whitelist so no immutable field can ride along.
- */
-export function buildUpdateSolverMessage(address: string): string {
-  return `update-solver:${address}`;
 }

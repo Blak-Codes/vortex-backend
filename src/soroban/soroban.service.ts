@@ -6,9 +6,11 @@ import { AppConfig } from "../config/configuration";
 @Injectable()
 export class SorobanService {
   private readonly server: SorobanRpc.Server;
+  private readonly rpcUrl: string;
 
   constructor(configService: ConfigService<AppConfig, true>) {
     const rpcUrl = configService.get("stellar.sorobanRpcUrl", { infer: true });
+    this.rpcUrl = rpcUrl;
     this.server = new SorobanRpc.Server(rpcUrl, { allowHttp: rpcUrl.startsWith("http://") });
   }
 
@@ -34,9 +36,34 @@ export class SorobanService {
    * Used by the event-ingestion loop to date the newest event it has seen: the
    * `closeTime` here is what makes `vortex_event_ingestion_lag_seconds` a real
    * measurement rather than a guess.
+   *
+   * @stellar/stellar-sdk 12 has no typed wrapper for the RPC `getLedgers`
+   * method, so the JSON-RPC call is issued directly. The result is returned in
+   * the `{ header: { closeTime } }` shape the ingestion loop reads.
    */
-  getLedger(sequence: number) {
-    return this.server.getLedger(sequence);
+  async getLedger(sequence: number): Promise<{ header?: { closeTime?: string } }> {
+    const response = await fetch(this.rpcUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: `get-ledgers-${sequence}`,
+        method: "getLedgers",
+        params: { startLedger: sequence, endLedger: sequence },
+      }),
+    });
+    if (!response.ok) {
+      throw new Error(`getLedgers HTTP ${response.status} for ledger ${sequence}`);
+    }
+    const body = (await response.json()) as {
+      result?: { ledgers?: Array<{ ledgerCloseTime?: string }> };
+      error?: { message?: string };
+    };
+    if (body.error) {
+      throw new Error(`getLedgers RPC error for ledger ${sequence}: ${body.error.message ?? "unknown"}`);
+    }
+    const ledger = body.result?.ledgers?.[0];
+    return ledger ? { header: { closeTime: ledger.ledgerCloseTime } } : {};
   }
 
   getEvents(request: SorobanRpc.Server.GetEventsRequest) {
