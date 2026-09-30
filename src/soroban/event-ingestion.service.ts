@@ -61,6 +61,7 @@ export class EventIngestionService implements OnModuleInit, OnModuleDestroy {
     private readonly sorobanService: SorobanService,
     private readonly configService: ConfigService<AppConfig, true>,
     private readonly solversService: SolversService,
+    private readonly leaderElection: LeaderElectionService,
     /**
      * SLO emitters for the on-chain dashboard. `@Optional()` so the unit tests
      * that construct this service directly do not need a metrics registry;
@@ -74,7 +75,6 @@ export class EventIngestionService implements OnModuleInit, OnModuleDestroy {
      * where the intent service is reached through a `forwardRef`.
      */
     @Optional() private readonly intentsService?: IntentsService,
-    private readonly leaderElection: LeaderElectionService,
   ) {}
 
   onModuleInit() {

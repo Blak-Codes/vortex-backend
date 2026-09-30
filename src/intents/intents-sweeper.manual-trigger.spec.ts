@@ -52,8 +52,8 @@ describe("IntentsSweeperService — manual sweep trigger (#269)", () => {
       solverRegistry,
       metricsService,
       killSwitch,
+      noopLeaderElection(),
     );
-    return new IntentsSweeperService(intentsService, gateway, solversService, solverRegistry, metricsService, noopLeaderElection());
   }
 
   afterEach(() => jest.restoreAllMocks());
