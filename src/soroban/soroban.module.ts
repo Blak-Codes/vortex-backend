@@ -20,6 +20,12 @@ import { IntentsModule } from "../intents/intents.module";
 // that ShadowService emits its counters through needs no import here.
 @Module({
   // SorobanModule <-> SolversModule <-> IntentsModule (which imports this
+  // module) form a CommonJS cycle, so both sides are wrapped in forwardRef.
+  // IntentsModule → SorobanModule (IntentsService submits settlement writes)
+  // and SorobanModule → IntentsModule (EventIngestionService reconciles
+  // intents from on-chain events). SolversModule supplies SolversService to
+  // EventIngestionService and, via IntentsModule, also participates in the
+  // cycle — so it is deferred too.
   // module) form a CommonJS cycle. Both edges must be deferred — a bare import
   // resolves to `undefined` when the peer module is still mid-initialisation.
   // `forwardRef` is required on both sides: EventIngestionService reads an

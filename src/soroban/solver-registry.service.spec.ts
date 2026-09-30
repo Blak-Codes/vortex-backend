@@ -22,6 +22,7 @@ function makeConfigService(
     port: 4000,
     databaseUrl: "postgresql://vortex:vortex@localhost:5432/vortex?schema=public",
     stellar,
+    treasury: { address: "" },
     onchainIntentsEnabled: false,
     intentRetentionDays: 30,
     intentRetentionSweepMs: 60000,
@@ -45,6 +46,13 @@ function makeConfigService(
       redisUrl: "",
       pollMs: 2000,
     },
+    shadow: {
+      enabled: false,
+      sampleRate: 1,
+      queueMax: 256,
+      concurrency: 4,
+      sourceAccount: "",
+    },
     governance: {
       paramsContractId: "",
       paramsPollIntervalMs: 30_000,
@@ -59,6 +67,20 @@ function makeConfigService(
     adminApiKeys: "",
     guardianContractId: "",
     canaryAddresses: [],
+    datasets: {
+      enabled: false,
+      anonymize: true,
+      salt: "",
+      saltRotationHours: 24,
+      saltRetentionWindows: 2,
+      publicBucket: "vortex-public-datasets",
+      storageKind: "local",
+      localDir: ".datasets",
+    },
+    secrets: {
+      provider: "env",
+      refreshIntervalMs: 60000,
+      extra: "",
     ws: {
       maxPayloadBytes: 16384,
       maxConnectionsPerIp: 20,

@@ -165,6 +165,13 @@ export class IntentsGateway
     }
   }
 
+  handleConnection(client: WebSocket) {
+    this.subscribers.set(client, {
+      chains: null,
+      solver: null,
+      wantAll: false,
+      subscriptionCount: 0,
+    });
   /**
    * Send an event to a client using its negotiated encoding format (Activity 1).
    * 
@@ -463,6 +470,14 @@ export class IntentsGateway
 
     // all=true: opt out of capability filtering.
     if (msg.all === true) {
+      const existing = this.subscribers.get(client) ?? {
+        chains: null,
+        solver: null,
+        wantAll: false,
+        subscriptionCount: 0,
+      };
+      const existing = this.subscribers.get(client) ?? { chains: null, solver: null, wantAll: false, subscriptionCount: 0 };
+      this.subscribers.set(client, { ...existing, wantAll: true });
       this.feed.updateClientFilter(feedClient, { ...current, wantAll: true });
       logger.debug("ws client opted out of capability filtering (all=true)");
       if (client.readyState === WebSocket.OPEN) {
@@ -522,6 +537,8 @@ export class IntentsGateway
         typeof c === "string" && (SUPPORTED_CHAINS as readonly string[]).includes(c),
     );
 
+    filter.chains = new Set(validChains);
+    filter.subscriptionCount += 1;
     // An explicit chain filter replaces any solver capability predicate.
     this.feed.updateClientFilter(feedClient, {
       ...current,
@@ -663,6 +680,13 @@ export class IntentsGateway
     const solver = solverRecord.address;
     const predicate = buildMatchPredicate(solverRecord);
     this.authenticatedSolver.set(client, solver);
+    const authFilter = this.subscribers.get(client);
+    this.subscribers.set(client, {
+      chains: authFilter?.chains ?? null,
+      solver: predicate,
+      wantAll: authFilter?.wantAll ?? false,
+      subscriptionCount: authFilter?.subscriptionCount ?? 0,
+    });
     const state = this.connections.get(client);
     if (state) state.identity = solver;
     const feedClient = this.feedClients.get(client);

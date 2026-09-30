@@ -254,6 +254,24 @@ export interface AppConfig {
   guardianContractId: string;
   /** Addresses (users and solvers) owned by the synthetic canary (issue #496). */
   canaryAddresses: string[];
+  /** Public anonymised dataset publication settings (see docs/rfcs/0001). */
+  datasets: {
+    enabled: boolean;
+    anonymize: boolean;
+    salt: string;
+    saltRotationHours: number;
+    saltRetentionWindows: number;
+    publicBucket: string;
+    storageKind: "local" | "memory";
+    localDir: string;
+  };
+  secrets: {
+    /** Provider name: "env" | "aws-secrets-manager" | "vault-kv". */
+    provider: "env" | "aws-secrets-manager" | "vault-kv";
+    /** Poll interval for secret rotation (ms). */
+    refreshIntervalMs: number;
+    /** Comma-separated extra secrets: "name:envVar:required". */
+    extra: string;
   /** WS gateway hardening (issue #455). */
   ws: {
     /** Largest inbound frame accepted; larger frames close the socket (1009). */
@@ -426,6 +444,20 @@ export default (): AppConfig => ({
     .split(",")
     .map((a) => a.trim())
     .filter(Boolean),
+  datasets: {
+    enabled: (process.env.DATASETS_ENABLED ?? "false") === "true",
+    anonymize: (process.env.DATASETS_ANONYMIZE ?? "true") === "true",
+    salt: process.env.DATASETS_SALT ?? "",
+    saltRotationHours: parseInt(process.env.DATASETS_SALT_ROTATION_HOURS ?? "24", 10),
+    saltRetentionWindows: parseInt(process.env.DATASETS_SALT_RETENTION_WINDOWS ?? "2", 10),
+    publicBucket: process.env.DATASETS_PUBLIC_BUCKET ?? "vortex-public-datasets",
+    storageKind: (process.env.DATASETS_STORAGE ?? "local") as "local" | "memory",
+    localDir: process.env.DATASETS_LOCAL_DIR ?? ".datasets",
+  },
+  secrets: {
+    provider: (process.env.SECRETS_PROVIDER ?? "env") as "env" | "aws-secrets-manager" | "vault-kv",
+    refreshIntervalMs: parseInt(process.env.SECRETS_REFRESH_INTERVAL_MS ?? "60000", 10),
+    extra: process.env.SECRETS_EXTRA ?? "",
   ws: {
     maxPayloadBytes: parseInt(process.env.WS_MAX_PAYLOAD_BYTES ?? "16384", 10),
     maxConnectionsPerIp: parseInt(process.env.WS_MAX_CONNECTIONS_PER_IP ?? "20", 10),

@@ -704,6 +704,8 @@ export class IntentsService {
       // An "accepted" intent always carries a solver. A record without one is
       // corrupt, so skip the simulation rather than encoding a null address —
       // the sweep loop already logs that case loudly.
+      const slashedSolver = subject?.solver;
+      if (subject && slashedSolver) {
       const solver = subject?.solver;
       if (solver && subject) {
         this.reportShadow(
@@ -713,6 +715,7 @@ export class IntentsService {
           "slash_intent",
           this.safeArgs(() => [
             nativeToScVal(subject.intentId, { type: "string" }),
+            new Address(slashedSolver).toScVal(),
             new Address(solver).toScVal(),
             nativeToScVal(patch.slashReason, { type: "string" }),
             nativeToScVal(patch.slashedAt, { type: "u64" }),

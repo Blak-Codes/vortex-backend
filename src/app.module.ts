@@ -45,8 +45,9 @@ import { TieredThrottleGuard } from "./auth/rate-limit/tiered-throttle.guard";
     // Issue #441 — API key tiers + distributed rate limiting.
     ApiKeysModule,
     // @Global() — registers MetricsService / MetricsInterceptor / MetricsController
-    // for the whole app. Must be imported here or the global providers never
-    // become visible to other modules (e.g. IntentsSweeperService).
+    // for the whole app. Must be imported once in the root module or the global
+    // providers never become visible to other modules (e.g. IntentsSweeperService)
+    // and Nest fails to resolve MetricsService at boot.
     MetricsModule,
     // Emergency pause control plane (issue #477). @Global() so KillSwitchGuard
     // can gate write handlers in any module.

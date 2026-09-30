@@ -22,6 +22,9 @@ describe("SorobanController", () => {
   let controller: SorobanController;
 
   beforeEach(async () => {
+    // `reset`, not `clear`: `mockResolvedValueOnce` queues survive
+    // `clearAllMocks`, so a leftover one-shot from the previous test would be
+    // served before the rejection this test installs.
     // `resetAllMocks`, not `clearAllMocks`: `clearAllMocks` only drops recorded
     // calls and leaves queued `mockResolvedValueOnce` / `mockRejectedValueOnce`
     // implementations in place, so a leftover value from an earlier test is

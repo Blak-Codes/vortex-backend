@@ -1,4 +1,5 @@
 import { BadRequestException, Inject, Injectable } from "@nestjs/common";
+import { SUPPORTED_TOKENS, StellarToken } from "./tokens.data";
 import { SUPPORTED_TOKENS, STELLAR_TOKENS, StellarToken } from "./tokens.data";
 import { SupportedChain } from "../intents/intents.types";
 import { ITokensRepository, TOKENS_REPOSITORY, TokenRecord } from "./tokens.repository";
@@ -163,7 +164,7 @@ export class TokensService {
    * than erroring: this endpoint feeds discovery UIs, and a client with a
    * stale chain list should see everything, not a 4xx.
    */
-  async getByChain(chain?: string) {
+  async getByChain(chain?: string): Promise<TokensByChainResponse> {
     const requested = chain?.toLowerCase();
 
     if (requested === "stellar") {
@@ -189,7 +190,7 @@ export class TokensService {
     // Bucket by chain, pre-seeding a key for every chain the static registry
     // declares so a chain with no rows still appears as an empty array rather
     // than vanishing from the response shape.
-    const byChain: Record<string, ReturnType<TokensService["toApiToken"]>[]> = {};
+    const byChain: Record<string, ApiToken[]> = {};
     for (const key of Object.keys(SUPPORTED_TOKENS)) {
       byChain[key] = [];
     }

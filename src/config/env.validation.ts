@@ -26,6 +26,7 @@ export const envValidationSchema = Joi.object({
 
   STELLAR_NETWORK: Joi.string().valid("testnet", "futurenet", "mainnet").default("testnet"),
   SOROBAN_RPC_URL: Joi.string().uri().default("https://soroban-testnet.stellar.org"),
+  // Horizon base URL, used for account/balance reads (treasury, canary tooling).
   HORIZON_URL: Joi.string().uri().default("https://horizon-testnet.stellar.org"),
   SETTLEMENT_CONTRACT_ID: Joi.string().allow("").default(""),
   SOLVER_REGISTRY_CONTRACT_ID: Joi.string().allow("").default(""),
@@ -49,6 +50,8 @@ export const envValidationSchema = Joi.object({
     }),
 
   ONCHAIN_INTENTS_ENABLED: Joi.boolean().default(false),
+  // Stellar public key of the treasury account (fee/slash/refund accumulator).
+  TREASURY_ADDRESS: Joi.string().allow("").default(""),
 
   // Stellar public key of the treasury account (fee accumulator).
   TREASURY_ADDRESS: Joi.string().allow("").default(""),
@@ -368,6 +371,55 @@ export const envValidationSchema = Joi.object({
   // and leaderboards.
   CANARY_ADDRESSES: Joi.string().allow("").default(""),
 
+  // ── Public anonymised datasets (docs/rfcs/0001) ───────────────────────────
+  DATASETS_ENABLED: Joi.boolean().default(false),
+  DATASETS_ANONYMIZE: Joi.boolean().default(true),
+  // Required only when datasets are enabled AND anonymisation is on — an
+  // empty/weak salt would collapse pseudonymisation to a fixed, reversible
+  // transform.  It stays optional (default "") otherwise so existing dev/test
+  // configs are unaffected.
+  DATASETS_SALT: Joi.string()
+    .when("DATASETS_ENABLED", {
+      is: true,
+      then: Joi.string().when("DATASETS_ANONYMIZE", {
+        is: true,
+        then: Joi.string()
+          .min(32)
+          .required()
+          .messages({
+            "any.required":
+              "DATASETS_SALT must be set when DATASETS_ENABLED=true and DATASETS_ANONYMIZE=true. " +
+              "Generate a strong random secret (e.g. `openssl rand -hex 32`).",
+            "string.min": "DATASETS_SALT must be at least 32 characters.",
+          }),
+        otherwise: Joi.string().allow("").default(""),
+      }),
+      otherwise: Joi.string().allow("").default(""),
+    }),
+  DATASETS_SALT_ROTATION_HOURS: Joi.number().integer().min(1).default(24),
+  DATASETS_SALT_RETENTION_WINDOWS: Joi.number().integer().min(0).default(2),
+  DATASETS_PUBLIC_BUCKET: Joi.string().default("vortex-public-datasets"),
+  DATASETS_STORAGE: Joi.string().valid("local", "memory").default("local"),
+  DATASETS_LOCAL_DIR: Joi.string().default(".datasets"),
+
+  // ── Secrets Manager (issue #465) ────────────────────────────────────────────
+  SECRETS_PROVIDER: Joi.string().valid("env", "aws-secrets-manager", "vault-kv").default("env"),
+  SECRETS_REFRESH_INTERVAL_MS: Joi.number().integer().min(5000).default(60000),
+  SECRETS_EXTRA: Joi.string().allow("").default(""),
+
+  // AWS Secrets Manager
+  AWS_SECRETS_MANAGER_PREFIX: Joi.string().allow("").default(""),
+  AWS_SECRETS_MANAGER_POLL_INTERVAL_MS: Joi.number().integer().min(5000).default(60000),
+
+  // Vault KV
+  VAULT_KV_MOUNT: Joi.string().default("secret"),
+  VAULT_KV_PREFIX: Joi.string().default("vortex/"),
+  VAULT_KV_POLL_INTERVAL_MS: Joi.number().integer().min(5000).default(60000),
+
+  // Extra secret env vars referenced by the default SecretConfig
+  JWT_SIGNING_KEY: Joi.string().allow("").default(""),
+  WEBHOOK_SECRET: Joi.string().allow("").default(""),
+  CHANNEL_KEY: Joi.string().allow("").default(""),
   // ── Egress / SSRF Protection (issue #468) ─────────────────────────────────
   // Controls the centralized HttpEgressService used for all outbound HTTP requests
   // (RPC, Horizon, oracles, webhooks) to prevent SSRF attacks.
