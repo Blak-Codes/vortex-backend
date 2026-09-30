@@ -1,4 +1,4 @@
-import { IsOptional, IsString, Matches, MaxLength, MinLength } from "class-validator";
+import { IsInt, IsOptional, IsString, Matches, Max, MaxLength, Min, MinLength } from "class-validator";
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
 
 const ED25519_SIGNATURE_MAX_LENGTH = 88;
@@ -20,6 +20,19 @@ export class FillIntentDto {
   @IsString()
   @MaxLength(128)
   txHash?: string;
+
+  @ApiPropertyOptional({ description: "Single-use signing nonce", minLength: 16, maxLength: 128 })
+  @IsOptional()
+  @IsString()
+  @Matches(/^[A-Za-z0-9_-]{16,128}$/)
+  nonce?: string;
+
+  @ApiPropertyOptional({ description: "Unix timestamp when the signature expires" })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(4102444800)
+  expiresAt?: number;
 
   @ApiProperty({
     description:

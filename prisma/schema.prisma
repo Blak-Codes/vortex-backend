@@ -81,6 +81,10 @@ model Intent {
   dstToken       Json        @map("dst_token")
   /// Minimum acceptable destination amount (base unit string).
   minDstAmount   String      @map("min_dst_amount")
+  /// Optional off-chain Dutch auction terms.
+  auction        Json?       @map("auction")
+  /// Auction price locked when a solver accepts.
+  acceptedDstAmount String?   @map("accepted_dst_amount")
   /// Best quote from solvers, populated after quoting.
   quotedDstAmount String?    @map("quoted_dst_amount")
   /// Solver address that accepted / filled this intent.
@@ -164,6 +168,16 @@ model IntentAuditLog {
 
   @@index([intentId, timestamp(sort: Asc)], name: "audit_log_intent_idx")
   @@map("intent_audit_log")
+}
+
+model SignatureNonce {
+  signer    String @map("signer")
+  nonce     String @map("nonce")
+  expiresAt Int    @map("expires_at")
+
+  @@id([signer, nonce])
+  @@index([expiresAt])
+  @@map("signature_nonces")
 }
 
 // ─── Token ───────────────────────────────────────────────────────────────────
