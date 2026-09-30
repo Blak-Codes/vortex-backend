@@ -1,5 +1,7 @@
-import { OnModuleDestroy, Optional } from "@nestjs/common";
+import { Inject, OnModuleDestroy, Optional } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
 import { OnGatewayConnection, OnGatewayDisconnect, WebSocketGateway } from "@nestjs/websockets";
+import type { IncomingMessage } from "node:http";
 import { WebSocket } from "ws";
 import { IntentsService } from "./intents.service";
 import { SolversService } from "../solvers/solvers.service";
@@ -12,234 +14,88 @@ import {
   WS_MAX_FILTER_CHAINS,
   WS_MAX_SUBSCRIPTIONS_PER_CONNECTION,
 } from "../config/limits.config";
+import configuration, { AppConfig } from "../config/configuration";
+import { verifyHs256Jwt } from "../common/jwt";
+import { Backplane, SequencedEvent, WS_BACKPLANE } from "./backplane/backplane.types";
+import { MemoryBackplane } from "./backplane/memory.backplane";
+import { ConnectionState, resolveClientIp, EncodingFormat } from "./ws/connection-state";
+import { EncodingCache } from "./ws/encoding-cache";
+import { ConnectionState, resolveClientIp } from "./ws/connection-state";
+import { IntentFeedService } from "./feed/intent-feed.service";
+import { FeedClient, FeedFilter } from "./feed/feed.types";
+import { randomUUID } from "node:crypto";
 
-const HEARTBEAT_INTERVAL_MS = 30_000;
-
-/**
- * How many sequenced events to keep in the replay buffer.
- *
- * At typical broadcast volume (a few dozen events/minute in production),
- * 500 events covers many minutes of missed events — more than enough to
- * bridge a transient network blip or container restart without forcing a
- * full snapshot re-fetch. Increasing this beyond ~1 000 starts to add
- * non-trivial heap pressure for large event payloads; the current bound
- * is a deliberate memory vs. reconnect-gap tradeoff.
- */
-const REPLAY_BUFFER_SIZE = 500;
-
-export interface SequencedEvent {
-  seq: number;
-  type: string;
-  [key: string]: unknown;
-}
+export type { SequencedEvent } from "./backplane/backplane.types";
+export { EventRingBuffer } from "./event-ring-buffer";
 
 /**
- * Per-subscriber filter (issue #436).
+ * WebSocket adapter over the transport-agnostic {@link IntentFeedService}
+ * (issue #433).
  *
- * `chains`   — explicit chain subscription set (`null` = unfiltered full feed).
- * `solver`   — capability predicate compiled from the authenticated solver's
- *              SolverRecord.  Non-null only for connections that have completed
- *              the `auth` handshake.
- * `wantAll`  — when `true` (sent via `{ type: "subscribe", all: true }`), the
- *              solver opts out of capability filtering and receives the full
- *              feed regardless of its chain/token support — useful for
- *              analytics consumers.
+ * The feed service owns sequencing, replay, filtering, delivery and connection
+ * accounting.  This class owns only the WebSocket protocol: the upgrade
+ * handshake, the `subscribe` / `replay` / `auth` message frames, the
+ * solver-JWT handshake, and the ping/pong heartbeat.
  */
-interface SubscriberFilter {
-  chains: Set<SupportedChain> | null;
-  /** Compiled solver capability predicate (null = not authenticated). */
-  solver: SolverMatchPredicate | null;
-  /** Opt-out flag: receives all events even after authentication. */
-  wantAll: boolean;
-  /** Number of `subscribe` messages this connection has sent. */
-  subscriptionCount: number;
-}
-
-/**
- * Fixed-size ring buffer that retains the last `capacity` events so
- * reconnecting clients can request a replay from a known sequence number.
- */
-export class EventRingBuffer {
-  private readonly buf: SequencedEvent[] = [];
-  private readonly capacity: number;
-
-  constructor(capacity = REPLAY_BUFFER_SIZE) {
-    this.capacity = capacity;
-  }
-
-  push(event: SequencedEvent): void {
-    if (this.buf.length >= this.capacity) {
-      this.buf.shift();
-    }
-    this.buf.push(event);
-  }
-
-  /**
-   * Return all buffered events whose seq is strictly greater than `fromSeq`.
-   * Returns an empty array when `fromSeq` is older than the earliest buffered
-   * event (the caller should request a fresh snapshot instead).
-   */
-  since(fromSeq: number): SequencedEvent[] {
-    return this.buf.filter((e) => e.seq > fromSeq);
-  }
-
-  /** Lowest seq still in the buffer, or -1 when empty. */
-  oldestSeq(): number {
-    return this.buf.length === 0 ? -1 : this.buf[0].seq;
-  }
-
-  /** Highest seq in the buffer, or 0 when empty. */
-  latestSeq(): number {
-    return this.buf.length === 0 ? 0 : this.buf[this.buf.length - 1].seq;
-  }
-
-  size(): number {
-    return this.buf.length;
-  }
-}
-
-/**
- * Authentication / access-control decision (issue #49, updated #436)
- * ─────────────────────────────────────────────────────────────────────
- * The intent feed is intentionally PUBLIC and READ-ONLY for all clients.
- *
- * Solver bots that authenticate via `{ type: "auth", ... }` receive an
- * *auto-scoped* feed: only intents matching their supported chains / tokens
- * and with a non-zero bond requirement are delivered.  This reduces noise and
- * bandwidth as the solver set grows (O(solvers × intents) → O(solvers × matching-intents)).
- *
- * Opt-out: `{ type: "subscribe", all: true }` returns the full unfiltered feed
- * regardless of authentication — designed for analytics / monitoring consumers.
- *
- * Solver bots submit intents and accept/fill them through the authenticated
- * REST API. The WS gateway never accepts writes.
- */
-@WebSocketGateway({ path: "/ws" })
+// maxPayload is enforced by `ws` itself (close 1009). Read from the
+// environment because decorator options are evaluated at import time;
+// handleMessage re-checks against the validated config.
+@WebSocketGateway({ path: "/ws", maxPayload: configuration().ws.maxPayloadBytes })
 export class IntentsGateway
   implements OnGatewayConnection, OnGatewayDisconnect, OnModuleDestroy
 {
-  /**
-   * Map from WebSocket client to its per-connection subscription filter.
-   */
-  private readonly subscribers = new Map<WebSocket, SubscriberFilter>();
-  private readonly alive = new WeakMap<WebSocket, boolean>();
+  /** Per-connection identity, rate-limit and outbound-queue state (issue #455). */
+  private readonly connections = new Map<WebSocket, ConnectionState>();
+  /** Maps a live WebSocket to its feed-service client wrapper. */
+  private readonly feedClients = new Map<WebSocket, WsFeedClient>();
   private readonly authenticatedSolver = new WeakMap<WebSocket, string>();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private heartbeatTimer: any;
-  private nextSeq = 1;
-  private readonly backplane: null | {
-    publish: (event: Record<string, unknown>) => void;
-    subscribe: (handler: (event: Record<string, unknown>) => void) => void;
-  } = null;
+
+  private readonly wsConfig: AppConfig["ws"];
+  private readonly jwtSecret: string;
+
+  /** Fan-out + global sequencing (issue #454): memory or Redis Streams. */
+  private readonly backplane: Backplane;
+  /** Serialises local delivery so events reach clients in `seq` order. */
+  private deliveryChain: Promise<void> = Promise.resolve();
 
   /** Ring buffer storing the last REPLAY_BUFFER_SIZE broadcast events. */
   private readonly ringBuffer = new EventRingBuffer(REPLAY_BUFFER_SIZE);
+
+  /** Encoding cache: serialize once per format, not per client (Activity 1). */
+  private readonly encodingCache = new EncodingCache(REPLAY_BUFFER_SIZE);
+
+  /** Graceful shutdown state (Activity 2). */
+  private draining = false;
+  private drainStartedAt = 0;
 
   constructor(
     private readonly intentsService: IntentsService,
     private readonly solversService: SolversService,
     private readonly intentIndex: IntentCapabilityIndex,
+    private readonly feed: IntentFeedService,
     @Optional() private readonly metricsService?: MetricsService,
+    @Optional() config?: ConfigService<AppConfig, true>,
+    @Optional() @Inject(WS_BACKPLANE) backplane?: Backplane,
   ) {
+    const defaults = configuration();
+    this.wsConfig = config?.get("ws", { infer: true }) ?? defaults.ws;
+    this.jwtSecret = config?.get("authJwtSecret", { infer: true }) ?? defaults.authJwtSecret;
     this.heartbeatTimer = setInterval(() => this.heartbeat(), HEARTBEAT_INTERVAL_MS);
-    this.backplane = this.createBackplane();
-    if (this.backplane) {
-      this.backplane.subscribe((event) => {
-        const type = typeof event.type === "string" ? event.type : "";
-        if (!type) return;
-        this.dispatchRemoteEvent(event as Record<string, unknown>);
-      });
-    }
-    logger.info("ws heartbeat started");
+    logger.info(`ws heartbeat started (backplane=${this.feed.backplaneHealth().mode})`);
   }
 
-  private createBackplane(): null | {
-    publish: (event: Record<string, unknown>) => void;
-    subscribe: (handler: (event: Record<string, unknown>) => void) => void;
-  } {
-    const mode = (process.env.WS_BACKPLANE ?? "memory").toLowerCase();
-    if (mode !== "redis") return null;
-
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires, @typescript-eslint/no-require-imports
-      const redis = require("redis");
-      if (!redis?.createClient) {
-        logger.warn("WS_BACKPLANE=redis but the redis package is not available; falling back to memory");
-        return null;
-      }
-
-      const client = redis.createClient({ url: process.env.REDIS_URL ?? "redis://localhost:6379" });
-      const channel = "vortex:intents:ws";
-      const pub = client;
-      const sub = client.duplicate();
-
-      void sub.connect();
-      void sub.subscribe(channel, (message: string) => {
-        try {
-          const event = JSON.parse(message) as Record<string, unknown>;
-          if (event && typeof event === "object") {
-            this.dispatchRemoteEvent(event);
-          }
-        } catch {
-          // Ignore malformed backplane payloads.
-        }
-      });
-
-      return {
-        publish: (event: Record<string, unknown>) => {
-          void pub.publish(channel, JSON.stringify(event));
-        },
-        subscribe: (handler: (event: Record<string, unknown>) => void) => {
-          void sub.subscribe(channel, (message: string) => {
-            try {
-              const event = JSON.parse(message) as Record<string, unknown>;
-              handler(event);
-            } catch {
-              // Ignore malformed backplane payloads.
-            }
-          });
-        },
-      };
-    } catch {
-      logger.warn("WS_BACKPLANE=redis but the redis package is not available; falling back to memory");
-      return null;
-    }
-  }
-
-  private static isSupportedChain(value: unknown): value is SupportedChain {
-    return typeof value === "string" && (SUPPORTED_CHAINS as readonly string[]).includes(value);
-  }
-
-  private dispatchRemoteEvent(event: Record<string, unknown>) {
-    const type = typeof event.type === "string" ? event.type : "";
-    if (!type || type === "connected" || type === "snapshot" || type === "subscribed") return;
-
-    const payload = JSON.stringify(event);
-    const chain = this.getEventChainSync(event as { type: string; [key: string]: unknown });
-    this.deliverToMatchingSubscribers(payload, chain, event as { type: string; [key: string]: unknown });
+  /** Backplane health for /health (issue #454). */
+  backplaneHealth() {
+    return this.feed.backplaneHealth();
   }
 
   /**
-   * Synchronous chain resolution for simple cases (used by dispatchRemoteEvent).
-   * Reads srcChain directly from the event or its inlined intent object.
-   */
-  private getEventChainSync(event: { type: string; [key: string]: unknown }): SupportedChain | null {
-    const intent = (event as { intent?: { srcChain?: unknown } }).intent;
-    if (intent && typeof intent.srcChain === "string" && IntentsGateway.isSupportedChain(intent.srcChain)) {
-      return intent.srcChain;
-    }
-
-    const srcChain = (event as { srcChain?: unknown }).srcChain;
-    if (typeof srcChain === "string" && IntentsGateway.isSupportedChain(srcChain)) {
-      return srcChain;
-    }
-
-    return null;
-  }
-
-  /**
-   * Deliver a pre-serialised event payload to every matching subscriber.
+   * Broadcast an event to every connected client (WS and SSE) on every replica.
    *
+   * Activity 1: Uses encoding cache — serializes once per format, not per client.
+   * 
    * Delivery rules (evaluated in order):
    * 1. Client is not OPEN → skip.
    * 2. Client set wantAll=true → always deliver.
@@ -252,7 +108,7 @@ export class IntentsGateway
    * 5. No filter → full unfiltered feed (backward-compatible default).
    */
   private deliverToMatchingSubscribers(
-    payload: string,
+    seq: number,
     chain: SupportedChain | null,
     event: { type: string; [key: string]: unknown },
   ) {
@@ -261,7 +117,7 @@ export class IntentsGateway
 
       // Opt-out: solver requested full feed.
       if (filter.wantAll) {
-        client.send(payload);
+        this.sendEncoded(client, seq, event);
         continue;
       }
 
@@ -275,7 +131,7 @@ export class IntentsGateway
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const matches = solverPredicate.matches(inlinedIntent as any);
           if (matches) {
-            client.send(payload);
+            this.sendEncoded(client, seq, event);
             try { this.metricsService?.incWsDelivered(solverPredicate.solverAddress); } catch { /* noop */ }
           } else {
             try { this.metricsService?.incWsFiltered(solverPredicate.solverAddress); } catch { /* noop */ }
@@ -285,26 +141,26 @@ export class IntentsGateway
 
         // State-transition events: the solver already filtered on intent_created,
         // so we pass them through to keep the feed self-consistent.
-        client.send(payload);
+        this.sendEncoded(client, seq, event);
         try { this.metricsService?.incWsDelivered(solverPredicate.solverAddress); } catch { /* noop */ }
         continue;
       }
 
       // No filter set → full unfiltered feed (backward-compatible default).
       if (filter.chains === null) {
-        client.send(payload);
+        this.sendEncoded(client, seq, event);
         continue;
       }
 
       // Chain couldn't be resolved → deliver to everyone (safe default).
       if (chain === null) {
-        client.send(payload);
+        this.sendEncoded(client, seq, event);
         continue;
       }
 
       // Only send if the event's chain is in this subscriber's filter.
       if (filter.chains.has(chain)) {
-        client.send(payload);
+        this.sendEncoded(client, seq, event);
       }
     }
   }
@@ -316,7 +172,106 @@ export class IntentsGateway
       wantAll: false,
       subscriptionCount: 0,
     });
+  /**
+   * Send an event to a client using its negotiated encoding format (Activity 1).
+   * 
+   * Retrieves pre-serialized payload from encoding cache, avoiding redundant
+   * serialization work. At 10k connections with msgpack, this saves 9,999
+   * msgpackEncode() calls per broadcast.
+   */
+  private sendEncoded(client: WebSocket, seq: number, event: Record<string, unknown>): void {
+    const state = this.connections.get(client);
+    if (!state) {
+      // Fallback for connections without state (shouldn't happen)
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(JSON.stringify({ seq, ...event }));
+      }
+      return;
+    }
+
+    const payload = this.encodingCache.get(seq, event, state.encoding);
+    const result = state.send(payload);
+    
+    if (result === "dropped_oldest") {
+      this.metricsService?.wsOutboundDropped.inc();
+    } else if (result === "disconnected") {
+      this.metricsService?.wsSlowConsumerDisconnects.inc();
+      logger.warn(`ws slow consumer disconnected (ip=${state.ip}, queue full)`);
+      this.removeSubscriber(client);
+    }
+  }
+
+  /**
+   * Admits a connection (issue #455): enforces WS_MAX_CONNECTIONS and the
+   * per-IP limit (IP resolved through WS_TRUST_PROXY_HOPS), creates the
+   * per-connection state, and accepts an optional solver JWT from
+   * `?token=` or `Authorization: Bearer` (anonymous connections stay allowed).
+   * 
+   * Activity 1: Negotiates encoding format via Sec-WebSocket-Protocol header.
+   * Activity 2: Rejects new connections when draining.
+   * Delegates to the feed service, which owns sequencing and delivery.  This
+   * method exists so existing callers (controller, sweeper) keep working
+   * against the gateway's public surface.
+   */
+  broadcast(event: { type: string; [key: string]: unknown }): Promise<void> {
+    return this.feed.broadcast(event);
+  }
+
+  private static isSupportedChain(value: unknown): value is SupportedChain {
+    return typeof value === "string" && (SUPPORTED_CHAINS as readonly string[]).includes(value);
+  }
+
+  /**
+   * Admit a WebSocket connection (issue #455): enforces the shared connection
+   * limits through the feed service, creates the per-connection state, and
+   * accepts an optional solver JWT from `?token=` or `Authorization: Bearer`.
+   */
+  handleConnection(client: WebSocket, request?: IncomingMessage) {
+    // Activity 2: Reject new connections during graceful shutdown
+    if (this.draining) {
+      client.close(1001, "Server draining");
+      this.metricsService?.wsConnectionsRejected.inc({ reason: "draining" });
+      return;
+    }
+
+    const ip = resolveClientIp(
+      request?.socket?.remoteAddress,
+      request?.headers?.["x-forwarded-for"],
+      this.wsConfig.trustProxyHops,
+    );
+
+    const filter: FeedFilter = { chains: null, solver: null, wantAll: false, users: null, states: null, subscriptionCount: 0 };
+    const state = new ConnectionState(
+      client,
+      ip,
+      { perSec: this.wsConfig.rateLimitPerSec, burst: this.wsConfig.rateLimitBurst },
+      {
+        queueMax: this.wsConfig.outboundQueueMax,
+        bufferBytes: this.wsConfig.outboundBufferBytes,
+        policy: this.wsConfig.slowConsumerPolicy,
+      },
+    );
+
+    // Activity 1: Negotiate encoding format from Sec-WebSocket-Protocol header
+    const protocols = request?.headers?.["sec-websocket-protocol"];
+    const encoding = this.negotiateEncoding(protocols);
+    state.encoding = encoding;
+
+    this.connections.set(client, state);
+    this.connectionsPerIp.set(ip, perIp + 1);
+    this.subscribers.set(client, { chains: null, solver: null, wantAll: false, subscriptionCount: 0 });
     this.alive.set(client, true);
+    const feedClient = new WsFeedClient(client, ip, state, this.metricsService);
+    const admission = this.feed.addClient(feedClient, filter);
+    if (!admission.ok) {
+      state.close();
+      this.metricsService?.wsConnectionsRejected.inc({ reason: admission.reason ?? "max_connections" });
+      client.close(1013, admission.reason === "per_ip" ? "Too many connections from this IP" : "Server at capacity");
+      return;
+    }
+
+    this.connections.set(client, state);
+    this.feedClients.set(client, feedClient);
     this.metricsService?.incWsConnection();
 
     client.on("message", (raw) => {
@@ -324,23 +279,25 @@ export class IntentsGateway
     });
 
     client.on("pong", () => {
-      this.alive.set(client, true);
+      feedClient.alive = true;
     });
 
     client.on("error", () => {
       this.removeSubscriber(client);
       logger.debug(
-        `ws client error/drop — active subscribers: ${this.subscribers.size}`,
+        `ws client error/drop — active subscribers: ${this.feed.connectionCount}`,
       );
     });
 
-    const currentSeq = this.nextSeq - 1;
+    const currentSeq = this.feed.currentSeq;
 
-    client.send(
+    this.send(
+      client,
       JSON.stringify({
         type: "connected",
         message: "Vortex intent stream",
         seq: currentSeq,
+        encoding,
       }),
     );
 
@@ -348,40 +305,85 @@ export class IntentsGateway
     // immediately after the "connected" message.
     Promise.resolve(this.intentsService.getByState("open"))
       .then((open) => {
-        client.send(JSON.stringify({ type: "snapshot", intents: open.slice(0, 20), seq: currentSeq }));
+        this.send(client, JSON.stringify({ type: "snapshot", intents: open.slice(0, 20), seq: currentSeq }));
       })
       .catch(() => {
         /* snapshot failure is non-fatal — client can re-fetch via REST */
       });
 
-    logger.info(`ws client connected (subscribers=${this.subscribers.size})`);
+    const token = IntentsGateway.bearerToken(request);
+    if (token) void this.authenticateJwt(client, token);
+
+    logger.info(`ws client connected (subscribers=${this.subscribers.size}, encoding=${encoding})`);
+  }
+
+  /**
+   * Negotiate encoding format from Sec-WebSocket-Protocol header (Activity 1).
+   * 
+   * Clients send: `Sec-WebSocket-Protocol: vortex.v1+msgpack`
+   * Server responds with the negotiated protocol in upgrade response.
+   * 
+   * @returns "msgpack" if client requests it, otherwise "json" (default)
+   */
+  private negotiateEncoding(protocols: string | string[] | undefined): EncodingFormat {
+    if (!protocols) return "json";
+    const requested = Array.isArray(protocols) ? protocols : protocols.split(",").map(p => p.trim());
+    if (requested.includes("vortex.v1+msgpack")) {
+      return "msgpack";
+    }
+    return "json";
+    logger.info(`ws client connected (subscribers=${this.feed.connectionCount})`);
+  }
+
+  /** JWT from `?token=` or `Authorization: Bearer` on the upgrade request. */
+  private static bearerToken(request?: IncomingMessage): string | null {
+    const auth = request?.headers?.authorization;
+    if (auth?.startsWith("Bearer ")) return auth.slice(7).trim();
+    try {
+      return new URL(request?.url ?? "", "http://localhost").searchParams.get("token");
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Queues `payload` for `client` through its backpressure-aware state
+   * (issue #455), counting slow-consumer drops and disconnects.
+   */
+  private send(client: WebSocket, payload: string): void {
+    const state = this.connections.get(client);
+    if (!state) {
+      if (client.readyState === WebSocket.OPEN) client.send(payload);
+      return;
+    }
+    const result = state.send(payload);
+    if (result === "dropped_oldest") {
+      this.metricsService?.wsOutboundDropped.inc();
+    } else if (result === "disconnected") {
+      this.metricsService?.wsSlowConsumerDisconnects.inc();
+      logger.warn(`ws slow consumer disconnected (ip=${state.ip}, queue full)`);
+      this.removeSubscriber(client);
+    }
   }
 
   handleDisconnect(client: WebSocket) {
     this.removeSubscriber(client);
-    logger.info(`ws client disconnected (subscribers=${this.subscribers.size})`);
+    logger.info(`ws client disconnected (subscribers=${this.feed.connectionCount})`);
   }
 
-  /**
-   * Drop a client from the subscriber set and keep the connection gauge honest.
-   *
-   * Every path that removes a client goes through here — explicit disconnect,
-   * a transport-level `error`, and the heartbeat terminator — because they are
-   * mutually exclusive in practice but not in the platform: a socket that
-   * errors frequently never reaches `handleDisconnect`, and one that dies
-   * silently is only reaped by the heartbeat. Removing a client from two
-   * places with a bare `subscribers.delete` would leak
-   * `vortex_ws_connections_active` upwards until the process restarts, and a
-   * gauge that only ever climbs turns the WS panels into decoration.
-   *
-   * The gauge is decremented only when this call actually removed something, so
-   * a duplicate disconnect cannot drive it negative.
-   */
+  /** Drop a client from the feed service and keep the connection gauge honest. */
   private removeSubscriber(client: WebSocket): void {
-    const removed = this.subscribers.delete(client);
+    const state = this.connections.get(client);
+    if (state) {
+      state.close();
+      this.connections.delete(client);
+    }
+    const feedClient = this.feedClients.get(client);
+    if (feedClient) {
+      this.feed.removeClient(feedClient);
+      this.feedClients.delete(client);
+    }
     this.authenticatedSolver.delete(client);
-    this.alive.delete(client);
-    if (removed) this.metricsService?.decWsConnection();
   }
 
   /**
@@ -394,10 +396,30 @@ export class IntentsGateway
    * - `{ type: "auth", solver, timestamp, signature }` — authenticate as a
    *   registered solver; installs a capability predicate and sends an
    *   auto-scoped snapshot of currently-eligible open intents.
-   *
-   * Unknown types and malformed messages are silently ignored.
    */
   private async handleMessage(client: WebSocket, raw: import("ws").RawData): Promise<void> {
+    if (client.readyState !== WebSocket.OPEN) return;
+    const size = Array.isArray(raw)
+      ? raw.reduce((n, b) => n + b.length, 0)
+      : (raw as Buffer | ArrayBuffer).byteLength;
+    if (size > this.wsConfig.maxPayloadBytes) {
+      client.close(1009, "Message too big");
+      return;
+    }
+
+    const state = this.connections.get(client);
+    if (state && !state.bucket.take()) {
+      state.violations += 1;
+      if (state.violations >= this.wsConfig.rateLimitMaxViolations) {
+        this.metricsService?.wsRateLimited.inc({ action: "disconnected" });
+        client.close(1008, "Rate limit exceeded");
+        return;
+      }
+      this.metricsService?.wsRateLimited.inc({ action: "rejected" });
+      this.send(client, JSON.stringify({ type: "rate_limited", retryAfterMs: Math.ceil(1000 / this.wsConfig.rateLimitPerSec) }));
+      return;
+    }
+
     let parsed: unknown;
     try {
       parsed = JSON.parse(raw.toString());
@@ -438,13 +460,14 @@ export class IntentsGateway
    * An entirely missing or non-array `chains` field is rejected silently
    * without updating the existing filter.
    *
-   * Issue #476: enforces two per-connection limits:
-   * 1. The `chains` array may contain at most `WS_MAX_FILTER_CHAINS` values.
-   * 2. A connection may send at most `WS_MAX_SUBSCRIPTIONS_PER_CONNECTION`
-   *    subscribe messages in its lifetime.  Excess subscribe attempts are
-   *    rejected with a `subscribe_rejected` error frame.
+   * Issue #476: enforces two per-connection limits.
    */
   private handleSubscribe(client: WebSocket, msg: Record<string, unknown>): void {
+    const feedClient = this.feedClients.get(client);
+    if (!feedClient) return;
+    const current = this.feed.getFilter(feedClient);
+    if (!current) return;
+
     // all=true: opt out of capability filtering.
     if (msg.all === true) {
       const existing = this.subscribers.get(client) ?? {
@@ -453,10 +476,12 @@ export class IntentsGateway
         wantAll: false,
         subscriptionCount: 0,
       };
+      const existing = this.subscribers.get(client) ?? { chains: null, solver: null, wantAll: false, subscriptionCount: 0 };
       this.subscribers.set(client, { ...existing, wantAll: true });
+      this.feed.updateClientFilter(feedClient, { ...current, wantAll: true });
       logger.debug("ws client opted out of capability filtering (all=true)");
       if (client.readyState === WebSocket.OPEN) {
-        client.send(JSON.stringify({ type: "subscribed", filter: { all: true } }));
+        this.send(client, JSON.stringify({ type: "subscribed", filter: { all: true } }));
       }
       return;
     }
@@ -466,20 +491,17 @@ export class IntentsGateway
       return;
     }
 
-    const filter = this.subscribers.get(client);
-    if (!filter) return;
-
     // ── Limit 1: max subscriptions per connection (issue #476) ───────────────
     const maxSubs = parseInt(
       process.env.WS_MAX_SUBSCRIPTIONS ?? String(WS_MAX_SUBSCRIPTIONS_PER_CONNECTION),
       10,
     );
-    if (filter.subscriptionCount >= maxSubs) {
+    if (current.subscriptionCount >= maxSubs) {
       logger.warn(
         `ws subscribe_rejected: connection has reached the max subscription limit (${maxSubs})`,
       );
       if (client.readyState === WebSocket.OPEN) {
-        client.send(
+        this.send(client,
           JSON.stringify({
             type: "subscribe_rejected",
             reason: `Maximum subscription limit of ${maxSubs} reached for this connection`,
@@ -500,7 +522,7 @@ export class IntentsGateway
         `ws subscribe_rejected: chains array length ${rawChains.length} exceeds max ${maxChains}`,
       );
       if (client.readyState === WebSocket.OPEN) {
-        client.send(
+        this.send(client,
           JSON.stringify({
             type: "subscribe_rejected",
             reason: `chains array may contain at most ${maxChains} values`,
@@ -517,11 +539,19 @@ export class IntentsGateway
 
     filter.chains = new Set(validChains);
     filter.subscriptionCount += 1;
+    // An explicit chain filter replaces any solver capability predicate.
+    this.feed.updateClientFilter(feedClient, {
+      ...current,
+      chains: new Set(validChains),
+      solver: null,
+      wantAll: false,
+      subscriptionCount: current.subscriptionCount + 1,
+    });
 
     logger.debug(`ws client subscribed to chains: ${validChains.join(", ") || "(none)"}`);
 
     if (client.readyState === WebSocket.OPEN) {
-      client.send(
+      this.send(client,
         JSON.stringify({
           type: "subscribed",
           filter: { chains: validChains },
@@ -542,92 +572,112 @@ export class IntentsGateway
 
     if (client.readyState !== WebSocket.OPEN) return;
 
-    const oldest = this.ringBuffer.oldestSeq();
+    const feedClient = this.feedClients.get(client);
+    if (!feedClient) return;
 
-    if (oldest !== -1 && fromSeq < oldest - 1) {
-      client.send(
+    const result = this.feed.replaySince(fromSeq, feedClient);
+
+    if (result.tooOld) {
+      this.send(client,
         JSON.stringify({
           type: "replay_too_old",
           fromSeq,
-          oldestAvailableSeq: oldest,
+          oldestAvailableSeq: result.oldestSeq,
         }),
       );
-      logger.debug(`ws replay_too_old: fromSeq=${fromSeq} oldestAvailable=${oldest}`);
+      logger.debug(`ws replay_too_old: fromSeq=${fromSeq} oldestAvailable=${result.oldestSeq}`);
       return;
     }
 
-    const events = this.ringBuffer.since(fromSeq);
-
-    client.send(
+    this.send(client,
       JSON.stringify({
         type: "replay_start",
         fromSeq,
-        count: events.length,
+        count: result.events.length,
       }),
     );
 
-    for (const event of events) {
+    for (const event of result.events) {
       if (client.readyState !== WebSocket.OPEN) break;
-      client.send(JSON.stringify(event));
+      this.send(client, JSON.stringify(event));
     }
 
     if (client.readyState === WebSocket.OPEN) {
-      client.send(
+      this.send(client,
         JSON.stringify({
           type: "replay_end",
-          count: events.length,
+          count: result.events.length,
         }),
       );
     }
 
-    logger.debug(`ws replay complete: fromSeq=${fromSeq} count=${events.length}`);
+    logger.debug(`ws replay complete: fromSeq=${fromSeq} count=${result.events.length}`);
   }
 
   /**
    * Authenticate a solver connection and install a capability predicate.
-   *
-   * On success:
-   * 1. Compiles a per-solver match predicate from the solver's SolverRecord.
-   * 2. Installs it on the subscriber filter so future broadcasts are scoped.
-   * 3. Sends an `auth_ok` frame.
-   * 4. Immediately sends a scoped `eligible_snapshot` with currently-eligible
-   *    open intents from the in-memory index — so the solver doesn't need to
-   *    separately call GET /solvers/:address/eligible-intents after auth.
-   *
-   * Capability updates (e.g. bond changes ingested via event-ingestion) call
-   * `updateSolverPredicate()` directly — no reconnect required.
    */
   private async handleAuth(client: WebSocket, payload: Record<string, unknown>) {
+    if (typeof payload.token === "string") {
+      await this.authenticateJwt(client, payload.token);
+      return;
+    }
     const solver = typeof payload.solver === "string" ? payload.solver : "";
     const timestamp = payload.timestamp;
     const signature = typeof payload.signature === "string" ? payload.signature : "";
 
     if (!solver || !signature || typeof timestamp !== "number") {
-      client.send(JSON.stringify({ type: "auth_error", reason: "auth payload requires solver, timestamp, and signature" }));
+      this.send(client, JSON.stringify({ type: "auth_error", reason: "auth payload requires solver, timestamp, and signature" }));
       return;
     }
 
     const now = Math.floor(Date.now() / 1000);
     const skew = Math.abs(now - timestamp);
     if (skew > 300) {
-      client.send(JSON.stringify({ type: "auth_error", reason: "stale or future auth timestamp" }));
+      this.send(client, JSON.stringify({ type: "auth_error", reason: "stale or future auth timestamp" }));
       return;
     }
 
     const solverRecord = await this.solversService.get(solver);
     if (!solverRecord || !solverRecord.isActive) {
-      client.send(JSON.stringify({ type: "auth_error", reason: "solver not registered or inactive" }));
+      this.send(client, JSON.stringify({ type: "auth_error", reason: "solver not registered or inactive" }));
       return;
     }
 
     try {
       verifyStellarSignature(solver, buildWsAuthMessage(solver, timestamp), signature);
     } catch {
-      client.send(JSON.stringify({ type: "auth_error", reason: "invalid solver signature" }));
+      this.send(client, JSON.stringify({ type: "auth_error", reason: "invalid solver signature" }));
       return;
     }
 
-    // Build capability predicate and store it on the connection.
+    await this.installSolver(client, solverRecord, "signature");
+  }
+
+  /**
+   * Authenticates with a solver JWT from the SEP-10 flow (issue #455 / #442).
+   */
+  private async authenticateJwt(client: WebSocket, token: string): Promise<void> {
+    const claims = verifyHs256Jwt(token, this.jwtSecret);
+    if (!claims) {
+      this.send(client, JSON.stringify({ type: "auth_error", reason: "invalid or expired token" }));
+      return;
+    }
+    const solverRecord = await this.solversService.get(claims.sub);
+    if (!solverRecord || !solverRecord.isActive) {
+      this.send(client, JSON.stringify({ type: "auth_error", reason: "solver not registered or inactive" }));
+      return;
+    }
+    await this.installSolver(client, solverRecord, "jwt");
+  }
+
+  /** Binds a verified solver identity to the connection and sends its scoped snapshot. */
+  private async installSolver(
+    client: WebSocket,
+    solverRecord: NonNullable<Awaited<ReturnType<SolversService["get"]>>>,
+    method: "signature" | "jwt",
+  ): Promise<void> {
+    const solver = solverRecord.address;
     const predicate = buildMatchPredicate(solverRecord);
     this.authenticatedSolver.set(client, solver);
     const authFilter = this.subscribers.get(client);
@@ -637,34 +687,42 @@ export class IntentsGateway
       wantAll: authFilter?.wantAll ?? false,
       subscriptionCount: authFilter?.subscriptionCount ?? 0,
     });
+    const state = this.connections.get(client);
+    if (state) state.identity = solver;
+    const feedClient = this.feedClients.get(client);
+    if (feedClient) {
+      const current = this.feed.getFilter(feedClient);
+      if (current) {
+        this.feed.updateClientFilter(feedClient, { ...current, solver: predicate });
+      }
+    }
 
-    client.send(JSON.stringify({ type: "auth_ok" }));
+    this.send(client, JSON.stringify({ type: "auth_ok", method }));
 
-    // Send scoped snapshot of currently-eligible intents (issue #436).
     try {
       const eligible = this.intentIndex.getEligibleFor(solverRecord);
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(JSON.stringify({
-          type: "eligible_snapshot",
-          intents: eligible,
-          count: eligible.length,
-        }));
-      }
+      this.send(client, JSON.stringify({
+        type: "eligible_snapshot",
+        intents: eligible,
+        count: eligible.length,
+      }));
     } catch {
       // Non-fatal — solver can fall back to GET /solvers/:address/eligible-intents.
     }
 
-    logger.info(`ws solver auth ok: address=${solver} chains=${solverRecord.supportedChains.join(",")} tokens=${solverRecord.supportedTokens.join(",")}`);
+    // Use the predicate's normalized capability lists: a partially-populated
+    // solver record must not throw here and take down the auth path.
+    logger.info(
+      `ws solver auth ok: address=${solver} chains=${predicate.supportedChains.join(",")} tokens=${predicate.supportedTokens.join(",")}`,
+    );
   }
 
   /**
    * Update the capability predicate for all live connections authenticated as
    * the given solver address.
-   *
-   * Called by EventIngestionService when a BondDeposited / BondWithdrawn /
-   * SolverRegistered event updates a solver's capabilities — no reconnect needed.
    */
   async updateSolverPredicate(solverAddress: string): Promise<void> {
+    await this.feed.updateSolverPredicate(solverAddress);
     const solverRecord = await this.solversService.get(solverAddress);
     if (!solverRecord) return;
 
@@ -699,6 +757,7 @@ export class IntentsGateway
       "intent_cancelled",
       "intent_expired",
       "intent_slashed",
+      "auction_price",
     ]);
 
     if (lookupTypes.has(event.type)) {
@@ -720,8 +779,29 @@ export class IntentsGateway
   }
 
   /**
-   * Assign a monotonically increasing sequence number, push the event into
-   * the ring buffer, then deliver it to every subscriber whose filter matches.
+   * Broadcast an event to every client on every replica (issue #454).
+   *
+   * The backplane assigns the global sequence number and hands the event
+   * back to each replica's {@link deliver}. In memory mode this resolves after
+   * local delivery (unchanged behaviour); in redis mode it resolves once the
+   * event is queued, so request handlers never wait on Redis.
+   */
+  async broadcast(event: { type: string; [key: string]: unknown }): Promise<void> {
+    await this.backplane.publish(event);
+  }
+
+  /** Chains deliveries so async chain lookups cannot reorder events. */
+  private enqueueDelivery(event: SequencedEvent): Promise<void> {
+    const run = this.deliveryChain.then(() => this.deliver(event));
+    this.deliveryChain = run.catch((err: Error) => {
+      logger.error(`ws delivery failed: ${err.message}`);
+    });
+    return this.deliveryChain;
+  }
+
+  /**
+   * Push a sequenced event into the replay buffer, then deliver it to every
+   * subscriber whose filter matches.
    *
    * For authenticated solvers without `all=true`, only intents matching their
    * capability predicate are delivered.  State-transition events (no inlined
@@ -731,29 +811,24 @@ export class IntentsGateway
    * - Updates the intent index for `intent_created` (add) and terminal-state
    *   events (remove), keeping the capability index fresh without a rebuild.
    */
-  async broadcast(event: { type: string; [key: string]: unknown }): Promise<void> {
+  private async deliver(sequencedEvent: SequencedEvent): Promise<void> {
     const enqueuedAt = Date.now();
-    const seq = this.nextSeq++;
-    const sequencedEvent: SequencedEvent = { ...event, seq };
+    const { seq, ...event } = sequencedEvent;
 
     // Update the capability index before delivery so a racing replay or
     // eligible-intents call sees fresh state.
-    this.updateIndexForEvent(event);
+    this.updateIndexForEvent(sequencedEvent);
 
     // Push into replay buffer before sending.
     this.ringBuffer.push(sequencedEvent);
 
     logger.debug(`ws broadcast type=${event.type} seq=${seq} subscribers=${this.subscribers.size}`);
 
-    if (this.backplane) {
-      this.backplane.publish(sequencedEvent as Record<string, unknown>);
-    }
-
     // Resolve the chain once — shared across all subscriber checks.
-    const eventChain = await this.getEventChain(event);
+    const eventChain = await this.getEventChain(sequencedEvent);
 
-    const payload = JSON.stringify(sequencedEvent);
-    this.deliverToMatchingSubscribers(payload, eventChain, event);
+    // Activity 1: Pass seq + event separately so encoding cache can serialize
+    this.deliverToMatchingSubscribers(seq, eventChain, event);
 
     try {
       this.metricsService?.observeWsDelivery((Date.now() - enqueuedAt) / 1000);
@@ -786,44 +861,184 @@ export class IntentsGateway
 
   getAliveCount(): number {
     let count = 0;
-    for (const client of this.subscribers.keys()) {
-      if (this.alive.get(client) === true) count++;
+    for (const [client, feedClient] of this.feedClients) {
+      if (feedClient.alive) count++;
     }
     return count;
   }
 
   getSubscriberCount(): number {
-    return this.subscribers.size;
+    return this.feed.connectionCount;
   }
 
   /** Returns the current number of active WebSocket subscribers. */
   get subscriberCount(): number {
-    return this.subscribers.size;
+    return this.feed.connectionCount;
+  }
+
+  /**
+   * Check if the gateway is draining connections (Activity 2).
+   * Used by health indicators to flip readiness during shutdown.
+   */
+  isDraining(): boolean {
+    return this.draining;
   }
 
   private heartbeat() {
-    for (const [client] of this.subscribers) {
-      if (this.alive.get(client) === false) {
+    for (const [client, feedClient] of this.feedClients) {
+      if (!feedClient.alive) {
         client.terminate();
         this.removeSubscriber(client);
         logger.debug(
-          `ws heartbeat terminated dead client (subscribers=${this.subscribers.size})`,
+          `ws heartbeat terminated dead client (subscribers=${this.feed.connectionCount})`,
         );
         continue;
       }
 
-      this.alive.set(client, false);
+      feedClient.alive = false;
       if (client.readyState === WebSocket.OPEN) {
         client.ping();
       }
     }
   }
 
-  onModuleDestroy() {
+  async onModuleDestroy() {
+    // Activity 2: Graceful shutdown with connection draining
+    await this.startDraining();
+
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
-    for (const [client] of this.subscribers) {
-      client.close(1001, "Server shutting down");
+    for (const [client, feedClient] of this.feedClients) {
       this.removeSubscriber(client);
+      client.close(1001, "Server shutting down");
     }
+  }
+}
+
+const HEARTBEAT_INTERVAL_MS = 30_000;
+
+/**
+ * WebSocket adapter that bridges a `ws` socket to the feed service's
+ * {@link FeedClient} interface (issue #433).
+ *
+ * `send` applies the per-connection backpressure policy (issue #455) and
+ * returns `false` only when the connection should be terminated.
+ */
+class WsFeedClient implements FeedClient {
+  alive = true;
+  readonly id: string;
+  readonly ip: string;
+  /** Number of `subscribe` messages this connection has sent (issue #476). */
+  subscriptionCount = 0;
+
+  constructor(
+    private readonly socket: WebSocket,
+    ip: string,
+    private readonly state: ConnectionState,
+    private readonly metricsService?: MetricsService,
+  ) {
+    this.id = randomUUID();
+    this.ip = ip;
+  }
+
+  send(payload: string): boolean {
+    const result = this.state.send(payload);
+    if (result === "dropped_oldest") {
+      this.metricsService?.wsOutboundDropped.inc();
+      return true;
+    }
+    if (result === "disconnected") {
+      this.metricsService?.wsSlowConsumerDisconnects.inc();
+      return false;
+    }
+    return true;
+  }
+
+  close(): void {
+    this.state.close();
+    if (this.socket.readyState === WebSocket.OPEN) {
+      this.socket.close(1001, "Server shutting down");
+    }
+  }
+
+  /**
+   * Begin graceful shutdown (Activity 2): notify all clients and close
+   * connections in batches within the termination grace period.
+   * 
+   * Flow:
+   * 1. Set draining flag (rejects new connections)
+   * 2. Send server_draining event to all clients with resumeFrom seq
+   * 3. Close connections in batches with jittered delays
+   * 4. Background workers finish current batch (handled by IntentsSweeperService)
+   * 
+   * Kubernetes terminationGracePeriodSeconds should be at least DRAIN_TIMEOUT_MS + 5s.
+   */
+  async startDraining(): Promise<void> {
+    if (this.draining) return;
+    
+    this.draining = true;
+    this.drainStartedAt = Date.now();
+    
+    const drainTimeoutMs = parseInt(process.env.WS_DRAIN_TIMEOUT_MS ?? "25000", 10);
+    const currentSeq = this.backplane.health().lastSeq;
+    const clientCount = this.subscribers.size;
+
+    logger.warn(`ws draining started: ${clientCount} clients, timeout=${drainTimeoutMs}ms`);
+
+    // Notify all clients to reconnect with resume
+    const drainMessage = JSON.stringify({
+      type: "server_draining",
+      resumeFrom: currentSeq,
+      reconnectAfterMs: this.jitter(1000, 5000), // Stagger reconnects
+      reason: "graceful_shutdown",
+    });
+
+    for (const [client] of this.subscribers) {
+      if (client.readyState === WebSocket.OPEN) {
+        try {
+          client.send(drainMessage);
+        } catch {
+          // Best effort notification
+        }
+      }
+    }
+
+    // Close connections in batches to avoid thundering herd
+    const batchSize = Math.max(10, Math.ceil(clientCount / 10));
+    const clients = Array.from(this.subscribers.keys());
+    const batchDelayMs = Math.floor(drainTimeoutMs / Math.ceil(clientCount / batchSize));
+
+    for (let i = 0; i < clients.length; i += batchSize) {
+      const batch = clients.slice(i, i + batchSize);
+      
+      // Wait between batches
+      if (i > 0) {
+        await this.sleep(batchDelayMs);
+      }
+
+      for (const client of batch) {
+        if (client.readyState === WebSocket.OPEN) {
+          client.close(1001, "Server draining");
+        }
+        this.removeSubscriber(client);
+      }
+
+      logger.info(`ws drain progress: ${Math.min(i + batchSize, clientCount)}/${clientCount} closed`);
+    }
+
+    logger.warn(`ws draining complete: all clients closed`);
+  }
+
+  /**
+   * Generate a jittered delay in [min, max] ms to stagger reconnects.
+   */
+  private jitter(min: number, max: number): number {
+    return Math.floor(Math.random() * (max - min + 1)) + min;
+  }
+
+  /**
+   * Promise-based sleep helper.
+   */
+  private sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
   }
 }

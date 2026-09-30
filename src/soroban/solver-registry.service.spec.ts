@@ -77,6 +77,57 @@ function makeConfigService(
       storageKind: "local",
       localDir: ".datasets",
     },
+    secrets: {
+      provider: "env",
+      refreshIntervalMs: 60000,
+      extra: "",
+    ws: {
+      maxPayloadBytes: 16384,
+      maxConnectionsPerIp: 20,
+      trustProxyHops: 0,
+      rateLimitPerSec: 10,
+      rateLimitBurst: 20,
+      rateLimitMaxViolations: 5,
+      outboundQueueMax: 1000,
+      outboundBufferBytes: 1048576,
+      slowConsumerPolicy: "drop_oldest",
+    },
+    authJwtSecret: "",
+    rateLimitLocalPruneMs: 60000,
+    rateLimitRedisUrl: "",
+    credentialRevocationPubsub: "memory",
+    sse: {
+      heartbeatMs: 15000,
+      maxBufferBytes: 1048576,
+    },
+    datasets: {
+      enabled: false,
+      anonymize: true,
+      salt: "",
+      saltRotationHours: 24,
+      saltRetentionWindows: 2,
+      publicBucket: "",
+      storageKind: "memory",
+      localDir: "",
+    },
+    treasury: {
+      address: "",
+    },
+    shadow: {
+      enabled: false,
+      sampleRate: 1,
+      queueMax: 256,
+      concurrency: 4,
+      sourceAccount: "",
+    },
+    health: {
+      roles: ["api", "ws", "worker"],
+      checkIntervalMs: 5000,
+      readyFailureThreshold: 3,
+      readySuccessThreshold: 2,
+      eventLoopMaxLagMs: 1000,
+      rpcHealthUrls: ["https://soroban-testnet.stellar.org"],
+    },
   };
   return {
     get: (key: string) => {

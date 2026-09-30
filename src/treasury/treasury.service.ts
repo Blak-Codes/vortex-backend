@@ -169,6 +169,9 @@ export class TreasuryService {
             b.asset_type !== "native" &&
             "asset_code" in b &&
             "asset_issuer" in b &&
+          (b): b is typeof b & { asset_code: string; asset_issuer: string } =>
+            b.asset_type !== "native" &&
+            "asset_code" in b &&
             b.asset_code === code &&
             b.asset_issuer === issuer,
         );

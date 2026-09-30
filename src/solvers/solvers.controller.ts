@@ -18,6 +18,9 @@ import {
 } from "@nestjs/swagger";
 import { ConfigService } from "@nestjs/config";
 import { IntentsService } from "../intents/intents.service";
+import { IntentCapabilityIndex } from "../intents/solver-intent-matcher";
+import { SUPPORTED_CHAINS, SupportedChain } from "../intents/intents.types";
+import { ListIntentsDto } from "../intents/dto/list-intents.dto";
 import {
   buildDisputeMessage,
   buildRegisterMessage,
@@ -25,6 +28,8 @@ import {
   buildUpdateSolverMessage,
   verifyStellarSignature,
 } from "../common/stellar-signature";
+import { isCanaryIntent } from "../common/canary";
+import { AppConfig } from "../config/configuration";
 import { SolversService, LeaderboardWindow } from "./solvers.service";
 import { ListIntentsDto } from "../intents/dto/list-intents.dto";
 import { AppConfig } from "../config/configuration";
@@ -33,6 +38,7 @@ import { IntentCapabilityIndex } from "../intents/solver-intent-matcher";
 import { RegisterSolverDto } from "./dto/register-solver.dto";
 import { UpdateSolverDto } from "./dto/update-solver.dto";
 import { UpdateSolverStatusDto } from "./dto/update-solver-status.dto";
+import { SolverCredentialService } from "../auth/solver-credentials/solver-credential.service";
 
 const WINDOW_SECONDS: Record<Exclude<LeaderboardWindow, "all">, number> = {
   "24h": 24 * 60 * 60,
@@ -47,6 +53,7 @@ export class SolversController {
     private readonly solversService: SolversService,
     private readonly intentsService: IntentsService,
     private readonly intentIndex: IntentCapabilityIndex,
+    private readonly credentialService: SolverCredentialService,
     config: ConfigService<AppConfig, true>,
   ) {
     this.canary = new Set(config.get("canaryAddresses", { infer: true }) ?? []);
@@ -313,6 +320,8 @@ export class SolversController {
 
     const solver = await this.solversService.deregister(address);
     if (!solver) throw new NotFoundException("Solver not found");
+    // Issue #443 — instantly disable every credential of the deregistered solver.
+    await this.credentialService.disableAllForSolver(address);
     return {
       ...solver,
       withdrawalStatus: "pending",
@@ -326,6 +335,8 @@ export class SolversController {
 
     const solver = await this.solversService.deactivate(address);
     if (!solver) throw new NotFoundException("Solver not found");
+    // Issue #443 — instantly disable every credential of the deactivated solver.
+    await this.credentialService.disableAllForSolver(address);
     return solver;
   }
 

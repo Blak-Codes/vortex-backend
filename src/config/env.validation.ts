@@ -52,6 +52,24 @@ export const envValidationSchema = Joi.object({
   ONCHAIN_INTENTS_ENABLED: Joi.boolean().default(false),
   // Stellar public key of the treasury account (fee/slash/refund accumulator).
   TREASURY_ADDRESS: Joi.string().allow("").default(""),
+
+  // Stellar public key of the treasury account (fee accumulator).
+  TREASURY_ADDRESS: Joi.string().allow("").default(""),
+
+  ALLOW_LEGACY_STELLAR_SIGNATURES: Joi.boolean().default(false),
+  ETHEREUM_RPC_URL: Joi.string().uri({ scheme: ["http", "https"] }).allow("").default(""),
+  ETHEREUM_ESCROW_ADDRESS: Joi.string().pattern(/^$|^0x[a-fA-F0-9]{40}$/).default(""),
+  BASE_RPC_URL: Joi.string().uri({ scheme: ["http", "https"] }).allow("").default(""),
+  BASE_ESCROW_ADDRESS: Joi.string().pattern(/^$|^0x[a-fA-F0-9]{40}$/).default(""),
+  POLYGON_RPC_URL: Joi.string().uri({ scheme: ["http", "https"] }).allow("").default(""),
+  POLYGON_ESCROW_ADDRESS: Joi.string().pattern(/^$|^0x[a-fA-F0-9]{40}$/).default(""),
+  ARBITRUM_RPC_URL: Joi.string().uri({ scheme: ["http", "https"] }).allow("").default(""),
+  ARBITRUM_ESCROW_ADDRESS: Joi.string().pattern(/^$|^0x[a-fA-F0-9]{40}$/).default(""),
+  OPTIMISM_RPC_URL: Joi.string().uri({ scheme: ["http", "https"] }).allow("").default(""),
+  OPTIMISM_ESCROW_ADDRESS: Joi.string().pattern(/^$|^0x[a-fA-F0-9]{40}$/).default(""),
+  AVALANCHE_RPC_URL: Joi.string().uri({ scheme: ["http", "https"] }).allow("").default(""),
+  AVALANCHE_ESCROW_ADDRESS: Joi.string().pattern(/^$|^0x[a-fA-F0-9]{40}$/).default(""),
+  EVM_RPC_ALLOWLIST: Joi.string().allow("").default(""),
   CORS_ORIGIN: Joi.string().default("*"),
   WS_MAX_CONNECTIONS: Joi.number().integer().min(0).default(1000),
   SOROBAN_FEE_PERCENTILE: Joi.string()
@@ -155,6 +173,7 @@ export const envValidationSchema = Joi.object({
   // Must be explicitly set to "true" — any other value is treated as false.
   // A startup warning is emitted when this is enabled in production.
   ALLOW_LOCAL_SIGNER_IN_PROD: Joi.boolean().default(false),
+  
   // ── Resource-exhaustion limits (issue #476) ───────────────────────────────
   // These values are consumed by src/config/limits.config.ts at startup and
   // override the compile-time defaults when set.  All have safe defaults so
@@ -277,6 +296,7 @@ export const envValidationSchema = Joi.object({
   // Optional: when empty the monitor reports `contract_unconfigured` rather
   // than silently recording zero divergence.
   SHADOW_SOURCE_ACCOUNT: Joi.string().allow("").default(""),
+  
   // ── Governance parameters contract ────────────────────────────────────────
   // When set, ProtocolParamsService reads current + scheduled protocol
   // parameters (fee bps, fill windows, deadlines, exposure ratio, slash
@@ -287,6 +307,7 @@ export const envValidationSchema = Joi.object({
   // How often (ms) to poll the parameters contract.  30 s is the default;
   // lower values increase RPC load; raise in production if rate-limited.
   PARAMS_POLL_INTERVAL_MS: Joi.number().integer().min(5_000).default(30_000),
+  
   // ── Leader election (issue #493) ──────────────────────────────────────────
   // Controls whether Postgres advisory-lock based leader election is enabled
   // for singleton workers (sweeper, event-ingestion).
@@ -332,6 +353,16 @@ export const envValidationSchema = Joi.object({
     .pattern(/^([A-Za-z0-9_.-]+:(admin|superadmin):[^,:]{16,})(,[A-Za-z0-9_.-]+:(admin|superadmin):[^,:]{16,})*$/)
     .default(""),
 
+  // ── Public anonymised datasets ────────────────────────────────────────────
+  DATASETS_ENABLED: Joi.boolean().default(false),
+  DATASETS_ANONYMIZE: Joi.boolean().default(true),
+  DATASETS_SALT: Joi.string().allow("").default(""),
+  DATASETS_SALT_ROTATION_HOURS: Joi.number().integer().min(1).max(720).default(24),
+  DATASETS_SALT_RETENTION_WINDOWS: Joi.number().integer().min(0).max(30).default(2),
+  DATASETS_PUBLIC_BUCKET: Joi.string().allow("").default(""),
+  DATASETS_STORAGE_KIND: Joi.string().valid("local", "memory").default("memory"),
+  DATASETS_LOCAL_DIR: Joi.string().allow("").default(""),
+
   // ── Guardian emergency ingestion (issue #507) ─────────────────────────────
   GUARDIAN_CONTRACT_ID: Joi.string().allow("").default(""),
 
@@ -370,4 +401,80 @@ export const envValidationSchema = Joi.object({
   DATASETS_PUBLIC_BUCKET: Joi.string().default("vortex-public-datasets"),
   DATASETS_STORAGE: Joi.string().valid("local", "memory").default("local"),
   DATASETS_LOCAL_DIR: Joi.string().default(".datasets"),
+
+  // ── Secrets Manager (issue #465) ────────────────────────────────────────────
+  SECRETS_PROVIDER: Joi.string().valid("env", "aws-secrets-manager", "vault-kv").default("env"),
+  SECRETS_REFRESH_INTERVAL_MS: Joi.number().integer().min(5000).default(60000),
+  SECRETS_EXTRA: Joi.string().allow("").default(""),
+
+  // AWS Secrets Manager
+  AWS_SECRETS_MANAGER_PREFIX: Joi.string().allow("").default(""),
+  AWS_SECRETS_MANAGER_POLL_INTERVAL_MS: Joi.number().integer().min(5000).default(60000),
+
+  // Vault KV
+  VAULT_KV_MOUNT: Joi.string().default("secret"),
+  VAULT_KV_PREFIX: Joi.string().default("vortex/"),
+  VAULT_KV_POLL_INTERVAL_MS: Joi.number().integer().min(5000).default(60000),
+
+  // Extra secret env vars referenced by the default SecretConfig
+  JWT_SIGNING_KEY: Joi.string().allow("").default(""),
+  WEBHOOK_SECRET: Joi.string().allow("").default(""),
+  CHANNEL_KEY: Joi.string().allow("").default(""),
+  // ── Egress / SSRF Protection (issue #468) ─────────────────────────────────
+  // Controls the centralized HttpEgressService used for all outbound HTTP requests
+  // (RPC, Horizon, oracles, webhooks) to prevent SSRF attacks.
+  EGRESS_TIMEOUT_MS: Joi.number().integer().min(1000).max(60000).default(10000),
+  EGRESS_MAX_REDIRECTS: Joi.number().integer().min(0).max(5).default(3),
+  EGRESS_MAX_BODY_SIZE_BYTES: Joi.number().integer().min(1024).default(10485760), // 10MB
+  SOROBAN_RPC_ALLOWLIST: Joi.string().allow("").default(""),
+  WEBHOOK_ALLOWLIST: Joi.string().allow("").default(""),
+  ORACLE_ALLOWLIST: Joi.string().allow("").default(""),
+
+  // ── WS gateway hardening (issue #455) ─────────────────────────────────────
+  WS_MAX_PAYLOAD_BYTES: Joi.number().integer().min(1024).default(16384),
+  WS_MAX_CONNECTIONS_PER_IP: Joi.number().integer().min(0).default(20),
+  // Hops of trusted reverse proxies in front of the service. 0 ignores
+  // X-Forwarded-For entirely so clients cannot spoof their IP.
+  WS_TRUST_PROXY_HOPS: Joi.number().integer().min(0).default(0),
+  WS_RATE_LIMIT_PER_SEC: Joi.number().positive().default(10),
+  WS_RATE_LIMIT_BURST: Joi.number().integer().min(1).default(20),
+  WS_RATE_LIMIT_MAX_VIOLATIONS: Joi.number().integer().min(1).default(5),
+  WS_OUTBOUND_QUEUE_MAX: Joi.number().integer().min(1).default(1000),
+  WS_OUTBOUND_BUFFER_BYTES: Joi.number().integer().min(1024).default(1048576),
+  WS_SLOW_CONSUMER_POLICY: Joi.string().valid("drop_oldest", "disconnect").default("drop_oldest"),
+  // HS256 secret shared with the SEP-10 auth endpoint (#442). Empty disables
+  // JWT auth; signature auth keeps working.
+  AUTH_JWT_SECRET: Joi.string().allow("").min(32).default(""),
+
+  // ── Distributed rate limiting (issue #441) ─────────────────────────────────
+  // How often the local rate-limiter fallback prunes expired window entries.
+  // Only relevant during a Redis outage; keeps the fallback map bounded.
+  RATE_LIMIT_LOCAL_PRUNE_MS: Joi.number().integer().min(1000).max(60000).default(60000),
+
+  // Redis URL for the distributed rate limiter (#441). Leave empty to force the
+  // bounded local limiter (the limit is still enforced, per process).
+  RATE_LIMIT_REDIS_URL: Joi.string().allow("").optional(),
+
+  // ── Scoped solver credentials (issue #443) ─────────────────────────────────
+  // Cross-replica transport for credential revocation invalidation.
+  CREDENTIAL_REVOCATION_PUBSUB: Joi.string().valid("memory", "redis").default("memory"),
+
+  // ── SSE intent feed (issue #433) ───────────────────────────────────────────
+  // Heartbeat comment interval and per-client backpressure limit for the
+  // Server-Sent Events intent stream.
+  SSE_HEARTBEAT_MS: Joi.number().integer().min(1000).max(60000).default(15000),
+  SSE_MAX_BUFFER_BYTES: Joi.number().integer().min(1024).default(1048576),
+
+  // ── Health probes (issue #492) ────────────────────────────────────────────
+  // Comma-separated roles this process serves: api, ws, worker.
+  SERVICE_ROLES: Joi.string()
+    .pattern(/^(api|ws|worker)(,(api|ws|worker))*$/)
+    .default("api,ws,worker"),
+  HEALTH_CHECK_INTERVAL_MS: Joi.number().integer().min(500).default(5000),
+  HEALTH_READY_FAILURE_THRESHOLD: Joi.number().integer().min(1).default(3),
+  HEALTH_READY_SUCCESS_THRESHOLD: Joi.number().integer().min(1).default(2),
+  HEALTH_EVENT_LOOP_MAX_LAG_MS: Joi.number().integer().min(50).default(1000),
+  // Comma-separated Soroban RPC URLs for the RPC-quorum readiness check.
+  // Defaults to SOROBAN_RPC_URL.
+  SOROBAN_RPC_HEALTH_URLS: Joi.string().allow("").default(""),
 });
