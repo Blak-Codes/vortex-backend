@@ -620,6 +620,27 @@ export class StellarTxService {
       // actually receive.
       .addOperation(new Contract(params.contractId).call(params.method, ...params.args))
       .setTimebounds(now, now + this.simulationTimeoutSeconds)
+      .addOperation(
+        // The SDK expects `func` to be a fully-formed xdr.HostFunction that
+        // already carries its InvokeContractArgs; a bare enum value (and the
+        // SDK-11 style `args` array) produces an envelope that cannot be XDR
+        // encoded. The token argument mirrors the settlement contract's
+        // `native` (XLM) entry point — irrelevant to a simulation, but the
+        // ScVal must be well-formed for the envelope to decode.
+        Operation.invokeHostFunction({
+          func: xdr.HostFunction.hostFunctionTypeInvokeContract(
+            new xdr.InvokeContractArgs({
+              contractAddress: contract.toScAddress(),
+              // InvokeContractArgs takes the method name as a plain string and
+              // encodes it as a symbol itself, so no nativeToScVal here.
+              functionName: params.method,
+              args: params.args,
+            }),
+          ),
+          auth: [],
+        }),
+      )
+      .setTimeout(this.simulationTimeoutSeconds)
       .build();
   }
 

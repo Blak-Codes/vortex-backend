@@ -101,6 +101,7 @@ export class MetricsService implements OnModuleInit {
 
   // ── Solver-registry event ingestion (issue #399) ──────────────────────────
   public readonly solverRegistryEventsTotal: client.Counter<string>;
+  public readonly legacyStellarSignatures: client.Counter<string>;
 
   constructor(private readonly configService: ConfigService<AppConfig, true>) {
     this.register = new client.Registry();
@@ -228,6 +229,13 @@ export class MetricsService implements OnModuleInit {
       name: `${prefix}solver_registry_events_total`,
       help: "Solver-registry contract events ingested by type",
       labelNames: ["event_type"],
+      registers: [this.register],
+    });
+
+    this.legacyStellarSignatures = new client.Counter({
+      name: `${prefix}legacy_stellar_signatures_total`,
+      help: "Accepted version 1 Stellar intent signatures during the deprecation window",
+      labelNames: ["action"],
       registers: [this.register],
     });
 
