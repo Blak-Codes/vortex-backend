@@ -1,5 +1,5 @@
-import { IsOptional, IsString, Matches, MaxLength, MinLength } from "class-validator";
-import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
+import { IsString, Matches, MaxLength, MinLength } from "class-validator";
+import { ApiProperty } from "@nestjs/swagger";
 
 const ED25519_SIGNATURE_MAX_LENGTH = 88;
 
@@ -15,11 +15,11 @@ export class FillIntentDto {
   @Matches(/^\d+$/)
   fillAmount!: string;
 
-  @ApiPropertyOptional({ description: "Stellar fill transaction hash", maxLength: 128 })
-  @IsOptional()
+  @ApiProperty({ description: "Stellar fill transaction hash, independently checked against Horizon", maxLength: 128 })
   @IsString()
-  @MaxLength(128)
-  txHash?: string;
+  @MinLength(64)
+  @Matches(/^[0-9a-fA-F]{64}$/)
+  txHash!: string;
 
   @ApiProperty({
     description:

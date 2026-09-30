@@ -183,6 +183,30 @@ export class PrismaIntentsRepository implements IIntentsRepository {
   }
 
   /**
+   * Atomically claims a tx hash for one accepted intent. The unique index on
+   * intents.tx_hash arbitrates cross-intent races; the row predicate arbitrates
+   * concurrent attempts to replace a hash on the same intent.
+   */
+  async reserveFillTxHash(id: string, solver: string, txHash: string): Promise<Intent | null> {
+    const result = await this.prisma.intent.updateMany({
+      where: {
+        intentId: id,
+        state: PrismaIntentState.accepted,
+        solver,
+        OR: [{ txHash: null }, { txHash }],
+      },
+      data: {
+        txHash,
+        fillVerificationState: "pending",
+        fillVerificationReason: null,
+      },
+    });
+    if (result.count === 0) return null;
+    const row = await this.prisma.intent.findUnique({ where: { intentId: id } });
+    return row ? this.fromRow(row) : null;
+  }
+
+  /**
    * Atomically cancel an intent only when it is currently `open`. Guards
    * against a concurrent solver accept() or sweeper expiry on the same intent.
    */
@@ -276,6 +300,9 @@ export class PrismaIntentsRepository implements IIntentsRepository {
       filledAt: intent.filledAt ?? null,
       fillAmount: intent.fillAmount ?? null,
       txHash: intent.txHash ?? null,
+      fillVerificationState: intent.fillVerificationState ?? null,
+      fillVerificationReason: intent.fillVerificationReason ?? null,
+      fillVerifiedAt: intent.fillVerifiedAt ? new Date(intent.fillVerifiedAt) : null,
     };
 
     if (intent.feeAmount !== undefined) {
@@ -295,6 +322,9 @@ export class PrismaIntentsRepository implements IIntentsRepository {
     if (patch.fillAmount !== undefined) data.fillAmount = patch.fillAmount;
     if (patch.feeAmount !== undefined) (data as { feeAmount?: string | null }).feeAmount = patch.feeAmount ?? null;
     if (patch.txHash !== undefined) data.txHash = patch.txHash;
+    if (patch.fillVerificationState !== undefined) data.fillVerificationState = patch.fillVerificationState;
+    if (patch.fillVerificationReason !== undefined) data.fillVerificationReason = patch.fillVerificationReason;
+    if (patch.fillVerifiedAt !== undefined) data.fillVerifiedAt = patch.fillVerifiedAt ? new Date(patch.fillVerifiedAt) : null;
     if (patch.quotedDstAmount !== undefined) data.quotedDstAmount = patch.quotedDstAmount;
     if (patch.srcAmount !== undefined) data.srcAmount = patch.srcAmount;
     if (patch.minDstAmount !== undefined) data.minDstAmount = patch.minDstAmount;
@@ -323,6 +353,9 @@ export class PrismaIntentsRepository implements IIntentsRepository {
     fillAmount: string | null;
     feeAmount?: string | null;
     txHash: string | null;
+    fillVerificationState?: "pending" | "verified" | "rejected" | null;
+    fillVerificationReason?: string | null;
+    fillVerifiedAt?: Date | null;
   }): Intent {
     return {
       intentId: row.intentId,
@@ -341,6 +374,9 @@ export class PrismaIntentsRepository implements IIntentsRepository {
       ...(row.fillAmount !== null ? { fillAmount: row.fillAmount } : {}),
       ...(row.feeAmount !== undefined && row.feeAmount !== null ? { feeAmount: row.feeAmount } : {}),
       ...(row.txHash !== null ? { txHash: row.txHash } : {}),
+      ...(row.fillVerificationState ? { fillVerificationState: row.fillVerificationState } : {}),
+      ...(row.fillVerificationReason ? { fillVerificationReason: row.fillVerificationReason } : {}),
+      ...(row.fillVerifiedAt ? { fillVerifiedAt: row.fillVerifiedAt.toISOString() } : {}),
     };
   }
 

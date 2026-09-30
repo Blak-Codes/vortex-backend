@@ -17,6 +17,7 @@ import { SorobanModule } from "../soroban/soroban.module";
 import { AppConfig } from "../config/configuration";
 import { PrismaService } from "../prisma/prisma.service";
 import { GovernanceModule } from "../governance/governance.module";
+import { FillVerifierService } from "../soroban/fill-verifier.service";
 
 @Module({
   // Both SolversModule and SorobanModule import IntentsModule back, so both
@@ -31,7 +32,6 @@ import { GovernanceModule } from "../governance/governance.module";
     TokensModule,
     forwardRef(() => SorobanModule),
   ],
-  imports: [forwardRef(() => SolversModule), RoutingModule, TokensModule, SorobanModule, GovernanceModule],
   controllers: [IntentsController],
   providers: [
     // Select the persistence adapter based on INTENTS_PERSISTENCE env var.
@@ -49,6 +49,7 @@ import { GovernanceModule } from "../governance/governance.module";
       },
     },
     IntentsService,
+    FillVerifierService,
     IntentCapabilityIndex,
     backplaneProvider,
     IntentsGateway,
