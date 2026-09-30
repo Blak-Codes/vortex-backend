@@ -538,6 +538,140 @@ export class IntentsGateway
    */
   async updateSolverPredicate(solverAddress: string): Promise<void> {
     await this.feed.updateSolverPredicate(solverAddress);
+    const solverRecord = await this.solversService.get(solverAddress);
+    if (!solverRecord) return;
+
+    const predicate = buildMatchPredicate(solverRecord);
+    for (const [client, filter] of this.subscribers) {
+      if (this.authenticatedSolver.get(client) === solverAddress && filter.solver !== null) {
+        this.subscribers.set(client, { ...filter, solver: predicate });
+      }
+    }
+
+    logger.debug(`ws solver predicate updated for ${solverAddress}`);
+  }
+
+  /**
+   * Resolve the source chain for an event payload.
+   */
+  private async getEventChain(
+    event: { type: string; [key: string]: unknown },
+  ): Promise<SupportedChain | null> {
+    if (event.type === "intent_created") {
+      const intent = event.intent as { srcChain?: string } | undefined;
+      const chain = intent?.srcChain;
+      if (chain && (SUPPORTED_CHAINS as readonly string[]).includes(chain)) {
+        return chain as SupportedChain;
+      }
+      return null;
+    }
+
+    const lookupTypes = new Set([
+      "intent_accepted",
+      "intent_filled",
+      "intent_cancelled",
+      "intent_expired",
+      "intent_slashed",
+      "auction_price",
+    ]);
+
+    if (lookupTypes.has(event.type)) {
+      const intentId = typeof event.intentId === "string" ? event.intentId : null;
+      if (!intentId) return null;
+
+      try {
+        const intent = await this.intentsService.get(intentId);
+        if (intent && (SUPPORTED_CHAINS as readonly string[]).includes(intent.srcChain)) {
+          return intent.srcChain as SupportedChain;
+        }
+      } catch {
+        // Lookup failure is non-fatal — deliver to all subscribers.
+      }
+      return null;
+    }
+
+    return null;
+  }
+
+  /**
+   * Broadcast an event to every client on every replica (issue #454).
+   *
+   * The backplane assigns the global sequence number and hands the event
+   * back to each replica's {@link deliver}. In memory mode this resolves after
+   * local delivery (unchanged behaviour); in redis mode it resolves once the
+   * event is queued, so request handlers never wait on Redis.
+   */
+  async broadcast(event: { type: string; [key: string]: unknown }): Promise<void> {
+    await this.backplane.publish(event);
+  }
+
+  /** Chains deliveries so async chain lookups cannot reorder events. */
+  private enqueueDelivery(event: SequencedEvent): Promise<void> {
+    const run = this.deliveryChain.then(() => this.deliver(event));
+    this.deliveryChain = run.catch((err: Error) => {
+      logger.error(`ws delivery failed: ${err.message}`);
+    });
+    return this.deliveryChain;
+  }
+
+  /**
+   * Push a sequenced event into the replay buffer, then deliver it to every
+   * subscriber whose filter matches.
+   *
+   * For authenticated solvers without `all=true`, only intents matching their
+   * capability predicate are delivered.  State-transition events (no inlined
+   * intent) are always delivered to authenticated subscribers.
+   *
+   * Side-effects:
+   * - Updates the intent index for `intent_created` (add) and terminal-state
+   *   events (remove), keeping the capability index fresh without a rebuild.
+   */
+  private async deliver(sequencedEvent: SequencedEvent): Promise<void> {
+    const enqueuedAt = Date.now();
+    const { seq, ...event } = sequencedEvent;
+
+    // Update the capability index before delivery so a racing replay or
+    // eligible-intents call sees fresh state.
+    this.updateIndexForEvent(sequencedEvent);
+
+    // Push into replay buffer before sending.
+    this.ringBuffer.push(sequencedEvent);
+
+    logger.debug(`ws broadcast type=${event.type} seq=${seq} subscribers=${this.subscribers.size}`);
+
+    // Resolve the chain once — shared across all subscriber checks.
+    const eventChain = await this.getEventChain(sequencedEvent);
+
+    const payload = JSON.stringify(sequencedEvent);
+    this.deliverToMatchingSubscribers(payload, eventChain, sequencedEvent);
+
+    try {
+      this.metricsService?.observeWsDelivery((Date.now() - enqueuedAt) / 1000);
+    } catch {
+      // Metrics must never break broadcasts.
+    }
+  }
+
+  /** Keep the IntentCapabilityIndex in sync with broadcast events. */
+  private updateIndexForEvent(event: { type: string; [key: string]: unknown }): void {
+    try {
+      if (event.type === "intent_created") {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const intent = (event as any).intent;
+        if (intent) this.intentIndex.addIntent(intent);
+      } else if (
+        event.type === "intent_accepted" ||
+        event.type === "intent_filled" ||
+        event.type === "intent_cancelled" ||
+        event.type === "intent_expired" ||
+        event.type === "intent_slashed"
+      ) {
+        const intentId = typeof event.intentId === "string" ? event.intentId : null;
+        if (intentId) this.intentIndex.removeIntent(intentId);
+      }
+    } catch {
+      // Index update is best-effort — never break broadcasts.
+    }
   }
 
   getAliveCount(): number {

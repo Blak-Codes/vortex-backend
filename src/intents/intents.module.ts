@@ -22,6 +22,10 @@ import { SorobanModule } from "../soroban/soroban.module";
 import { AppConfig } from "../config/configuration";
 import { PrismaService } from "../prisma/prisma.service";
 import { GovernanceModule } from "../governance/governance.module";
+import { SignatureNonceService } from "../common/signature-nonce.service";
+import { EvmSignatureVerifier } from "../common/evm-signature";
+import { AuctionTickerService } from "../auctions/auction-ticker.service";
+import { FillVerifierService } from "../soroban/fill-verifier.service";
 
 @Module({
   // Both SolversModule and SorobanModule import IntentsModule back, so both
@@ -38,6 +42,7 @@ import { GovernanceModule } from "../governance/governance.module";
     GovernanceModule,
   ],
   controllers: [IntentsController, IntentsSseController],
+  controllers: [IntentsController],
   providers: [
     // Select the persistence adapter based on INTENTS_PERSISTENCE env var.
     // INTENTS_PERSISTENCE=prisma  → PrismaIntentsRepository (production/staging)
@@ -54,6 +59,10 @@ import { GovernanceModule } from "../governance/governance.module";
       },
     },
     IntentsService,
+    SignatureNonceService,
+    EvmSignatureVerifier,
+    AuctionTickerService,
+    FillVerifierService,
     IntentCapabilityIndex,
     backplaneProvider,
     // IntentFeedService is provided via a factory so its optional constructor

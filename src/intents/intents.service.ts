@@ -544,13 +544,24 @@ export class IntentsService {
    * unfairly slashed for a deadline that was never realistic.
    * Returns null when the intent is not found, not open, or past deadline.
    */
-  async acceptIfOpen(id: string, solver: string, now?: number): Promise<Intent | null> {
+  async acceptIfOpen(
+    id: string,
+    solver: string,
+    now?: number,
+    acceptedDstAmount?: string,
+  ): Promise<Intent | null> {
     const intent = await this.repo.findById(id);
     if (!intent) return null;
     const nowSec = now ?? Math.floor(Date.now() / 1000);
     const fillWindow =
       CHAIN_FILL_WINDOW_DEFAULTS[intent.srcChain] ?? DEFAULT_FILL_WINDOW_SECONDS;
-    const updated = await this.repo.acceptIfOpen(id, solver, nowSec + fillWindow, nowSec);
+    const updated = await this.repo.acceptIfOpen(
+      id,
+      solver,
+      nowSec + fillWindow,
+      nowSec,
+      acceptedDstAmount,
+    );
     if (updated !== null) this.countTransition("open", "accepted");
     if (this.beginShadowObservation()) {
       this.observeAccept(updated ?? intent, solver, updated !== null);
@@ -597,6 +608,11 @@ export class IntentsService {
       this.observeFill(id, solver, patch.fillAmount, patch.txHash, updated !== null);
     }
     return updated;
+  }
+
+  /** Reserve a tx hash once, atomically, before external verification begins. */
+  async reserveFillTxHash(id: string, solver: string, txHash: string): Promise<Intent | null> {
+    return this.repo.reserveFillTxHash(id, solver, txHash);
   }
 
   /** Shadow hook for `fill` — reported whether or not the conditional write won. */

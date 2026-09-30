@@ -53,6 +53,20 @@ export const envValidationSchema = Joi.object({
   // Stellar public key of the treasury account (fee accumulator).
   TREASURY_ADDRESS: Joi.string().allow("").default(""),
 
+  ALLOW_LEGACY_STELLAR_SIGNATURES: Joi.boolean().default(false),
+  ETHEREUM_RPC_URL: Joi.string().uri({ scheme: ["http", "https"] }).allow("").default(""),
+  ETHEREUM_ESCROW_ADDRESS: Joi.string().pattern(/^$|^0x[a-fA-F0-9]{40}$/).default(""),
+  BASE_RPC_URL: Joi.string().uri({ scheme: ["http", "https"] }).allow("").default(""),
+  BASE_ESCROW_ADDRESS: Joi.string().pattern(/^$|^0x[a-fA-F0-9]{40}$/).default(""),
+  POLYGON_RPC_URL: Joi.string().uri({ scheme: ["http", "https"] }).allow("").default(""),
+  POLYGON_ESCROW_ADDRESS: Joi.string().pattern(/^$|^0x[a-fA-F0-9]{40}$/).default(""),
+  ARBITRUM_RPC_URL: Joi.string().uri({ scheme: ["http", "https"] }).allow("").default(""),
+  ARBITRUM_ESCROW_ADDRESS: Joi.string().pattern(/^$|^0x[a-fA-F0-9]{40}$/).default(""),
+  OPTIMISM_RPC_URL: Joi.string().uri({ scheme: ["http", "https"] }).allow("").default(""),
+  OPTIMISM_ESCROW_ADDRESS: Joi.string().pattern(/^$|^0x[a-fA-F0-9]{40}$/).default(""),
+  AVALANCHE_RPC_URL: Joi.string().uri({ scheme: ["http", "https"] }).allow("").default(""),
+  AVALANCHE_ESCROW_ADDRESS: Joi.string().pattern(/^$|^0x[a-fA-F0-9]{40}$/).default(""),
+  EVM_RPC_ALLOWLIST: Joi.string().allow("").default(""),
   CORS_ORIGIN: Joi.string().default("*"),
   WS_MAX_CONNECTIONS: Joi.number().integer().min(0).default(1000),
   SOROBAN_FEE_PERCENTILE: Joi.string()

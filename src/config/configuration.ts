@@ -119,6 +119,14 @@ export interface AppConfig {
     address: string;
   };
   onchainIntentsEnabled: boolean;
+  legacyStellarSignatures: boolean;
+  evm: {
+    rpcAllowlist: string[];
+    chains: Record<
+      "ethereum" | "base" | "polygon" | "arbitrum" | "optimism" | "avalanche",
+      { chainId: number; rpcUrl: string; escrowAddress: string }
+    >;
+  };
   intentRetentionDays: number;
   intentRetentionSweepMs: number;
   /**
@@ -327,6 +335,19 @@ export default (): AppConfig => ({
     address: process.env.TREASURY_ADDRESS ?? "",
   },
   onchainIntentsEnabled: (process.env.ONCHAIN_INTENTS_ENABLED ?? "false") === "true",
+  legacyStellarSignatures:
+    process.env.ALLOW_LEGACY_STELLAR_SIGNATURES === "true" || process.env.NODE_ENV === "test",
+  evm: {
+    rpcAllowlist: (process.env.EVM_RPC_ALLOWLIST ?? "").split(",").map((host) => host.trim()).filter(Boolean),
+    chains: {
+      ethereum: { chainId: 1, rpcUrl: process.env.ETHEREUM_RPC_URL ?? "", escrowAddress: process.env.ETHEREUM_ESCROW_ADDRESS ?? "" },
+      base: { chainId: 8453, rpcUrl: process.env.BASE_RPC_URL ?? "", escrowAddress: process.env.BASE_ESCROW_ADDRESS ?? "" },
+      polygon: { chainId: 137, rpcUrl: process.env.POLYGON_RPC_URL ?? "", escrowAddress: process.env.POLYGON_ESCROW_ADDRESS ?? "" },
+      arbitrum: { chainId: 42161, rpcUrl: process.env.ARBITRUM_RPC_URL ?? "", escrowAddress: process.env.ARBITRUM_ESCROW_ADDRESS ?? "" },
+      optimism: { chainId: 10, rpcUrl: process.env.OPTIMISM_RPC_URL ?? "", escrowAddress: process.env.OPTIMISM_ESCROW_ADDRESS ?? "" },
+      avalanche: { chainId: 43114, rpcUrl: process.env.AVALANCHE_RPC_URL ?? "", escrowAddress: process.env.AVALANCHE_ESCROW_ADDRESS ?? "" },
+    },
+  },
   intentRetentionDays: parseInt(process.env.INTENT_RETENTION_DAYS ?? "30", 10),
   intentRetentionSweepMs: parseInt(process.env.INTENT_RETENTION_SWEEP_MS ?? "60000", 10),
   // Default to dry-run (true) outside production; in production the value must

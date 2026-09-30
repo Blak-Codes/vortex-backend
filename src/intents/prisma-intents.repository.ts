@@ -172,6 +172,7 @@ export class PrismaIntentsRepository implements IIntentsRepository {
     solver: string,
     newDeadline: number,
     now?: number,
+    acceptedDstAmount?: string,
   ): Promise<Intent | null> {
     const nowSec = now ?? Math.floor(Date.now() / 1000);
     const result = await this.prisma.intent.updateMany({
@@ -180,6 +181,7 @@ export class PrismaIntentsRepository implements IIntentsRepository {
         state: PrismaIntentState.accepted,
         solver,
         deadline: newDeadline,
+        ...(acceptedDstAmount !== undefined ? { acceptedDstAmount } : {}),
       },
     });
 
@@ -251,6 +253,30 @@ export class PrismaIntentsRepository implements IIntentsRepository {
 
     if (result.count === 0) return null; // guard failed
 
+    const row = await this.prisma.intent.findUnique({ where: { intentId: id } });
+    return row ? this.fromRow(row) : null;
+  }
+
+  /**
+   * Atomically claims a tx hash for one accepted intent. The unique index on
+   * intents.tx_hash arbitrates cross-intent races; the row predicate arbitrates
+   * concurrent attempts to replace a hash on the same intent.
+   */
+  async reserveFillTxHash(id: string, solver: string, txHash: string): Promise<Intent | null> {
+    const result = await this.prisma.intent.updateMany({
+      where: {
+        intentId: id,
+        state: PrismaIntentState.accepted,
+        solver,
+        OR: [{ txHash: null }, { txHash }],
+      },
+      data: {
+        txHash,
+        fillVerificationState: "pending",
+        fillVerificationReason: null,
+      },
+    });
+    if (result.count === 0) return null;
     const row = await this.prisma.intent.findUnique({ where: { intentId: id } });
     return row ? this.fromRow(row) : null;
   }
@@ -341,6 +367,8 @@ export class PrismaIntentsRepository implements IIntentsRepository {
       srcAmount: intent.srcAmount,
       dstToken: intent.dstToken as unknown as Prisma.InputJsonValue,
       minDstAmount: intent.minDstAmount,
+      ...(intent.auction ? { auction: intent.auction as unknown as Prisma.InputJsonValue } : {}),
+      acceptedDstAmount: intent.acceptedDstAmount ?? null,
       quotedDstAmount: intent.quotedDstAmount ?? null,
       solver: intent.solver ?? null,
       state: this.toPrismaState(intent.state),
@@ -352,6 +380,9 @@ export class PrismaIntentsRepository implements IIntentsRepository {
       ...(intent.usdValueAtCreate !== undefined
         ? { usdValueAtCreate: intent.usdValueAtCreate }
         : {}),
+      fillVerificationState: intent.fillVerificationState ?? null,
+      fillVerificationReason: intent.fillVerificationReason ?? null,
+      fillVerifiedAt: intent.fillVerifiedAt ? new Date(intent.fillVerifiedAt) : null,
     };
 
     if (intent.feeAmount !== undefined) {
@@ -371,10 +402,21 @@ export class PrismaIntentsRepository implements IIntentsRepository {
     if (patch.fillAmount !== undefined) data.fillAmount = patch.fillAmount;
     if (patch.feeAmount !== undefined) (data as { feeAmount?: string | null }).feeAmount = patch.feeAmount ?? null;
     if (patch.txHash !== undefined) data.txHash = patch.txHash;
+    if (patch.fillVerificationState !== undefined) data.fillVerificationState = patch.fillVerificationState;
+    if (patch.fillVerificationReason !== undefined) data.fillVerificationReason = patch.fillVerificationReason;
+    if (patch.fillVerifiedAt !== undefined) data.fillVerifiedAt = patch.fillVerifiedAt ? new Date(patch.fillVerifiedAt) : null;
     if (patch.quotedDstAmount !== undefined) data.quotedDstAmount = patch.quotedDstAmount;
     if (patch.srcAmount !== undefined) data.srcAmount = patch.srcAmount;
     if (patch.minDstAmount !== undefined) data.minDstAmount = patch.minDstAmount;
     if (patch.usdValueAtCreate !== undefined) data.usdValueAtCreate = patch.usdValueAtCreate;
+    if (patch.auction !== undefined) {
+      (data as Prisma.IntentUpdateInput & { auction?: Prisma.InputJsonValue }).auction =
+        patch.auction as unknown as Prisma.InputJsonValue;
+    }
+    if (patch.acceptedDstAmount !== undefined) {
+      (data as Prisma.IntentUpdateInput & { acceptedDstAmount?: string | null }).acceptedDstAmount =
+        patch.acceptedDstAmount ?? null;
+    }
     if ("slashedAt" in patch && patch.slashedAt !== undefined) {
       // slashedAt / slashReason are not Prisma schema columns yet; ignore silently
       // until the schema migration lands (issue #62).
@@ -391,6 +433,8 @@ export class PrismaIntentsRepository implements IIntentsRepository {
     srcAmount: string;
     dstToken: Prisma.JsonValue;
     minDstAmount: string;
+    auction: Prisma.JsonValue | null;
+    acceptedDstAmount: string | null;
     quotedDstAmount: string | null;
     solver: string | null;
     state: PrismaIntentState;
@@ -401,6 +445,9 @@ export class PrismaIntentsRepository implements IIntentsRepository {
     feeAmount?: string | null;
     txHash: string | null;
     usdValueAtCreate?: number | null;
+    fillVerificationState?: "pending" | "verified" | "rejected" | null;
+    fillVerificationReason?: string | null;
+    fillVerifiedAt?: Date | null;
   }): Intent {
     return {
       intentId: row.intentId,
@@ -410,6 +457,8 @@ export class PrismaIntentsRepository implements IIntentsRepository {
       srcAmount: row.srcAmount,
       dstToken: row.dstToken as unknown as StellarToken,
       minDstAmount: row.minDstAmount,
+      ...(row.auction !== null ? { auction: row.auction as unknown as Intent["auction"] } : {}),
+      ...(row.acceptedDstAmount !== null ? { acceptedDstAmount: row.acceptedDstAmount } : {}),
       ...(row.quotedDstAmount !== null ? { quotedDstAmount: row.quotedDstAmount } : {}),
       ...(row.solver !== null ? { solver: row.solver } : {}),
       state: row.state as IntentState,
@@ -422,6 +471,9 @@ export class PrismaIntentsRepository implements IIntentsRepository {
       ...(row.usdValueAtCreate !== null && row.usdValueAtCreate !== undefined
         ? { usdValueAtCreate: row.usdValueAtCreate }
         : {}),
+      ...(row.fillVerificationState ? { fillVerificationState: row.fillVerificationState } : {}),
+      ...(row.fillVerificationReason ? { fillVerificationReason: row.fillVerificationReason } : {}),
+      ...(row.fillVerifiedAt ? { fillVerifiedAt: row.fillVerifiedAt.toISOString() } : {}),
     };
   }
 

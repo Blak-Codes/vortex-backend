@@ -23,6 +23,12 @@ enum IntentState {
   slashed
 }
 
+enum FillVerificationState {
+  pending
+  verified
+  rejected
+}
+
 enum SupportedChain {
   stellar
   ethereum
@@ -93,6 +99,10 @@ model Intent {
   dstToken       Json        @map("dst_token")
   /// Minimum acceptable destination amount (base unit string).
   minDstAmount   String      @map("min_dst_amount")
+  /// Optional off-chain Dutch auction terms.
+  auction        Json?       @map("auction")
+  /// Auction price locked when a solver accepts.
+  acceptedDstAmount String?   @map("accepted_dst_amount")
   /// Best quote from solvers, populated after quoting.
   quotedDstAmount String?    @map("quoted_dst_amount")
   /// Solver address that accepted / filled this intent.
@@ -116,6 +126,10 @@ model Intent {
   /// NULL when the token price was unknown at creation — historical rows
   /// pre-dating this field are never backfilled with fabricated values.
   usdValueAtCreate Float?    @map("usd_value_at_create")
+  txHash         String?     @unique(map: "intents_tx_hash_key") @map("tx_hash")
+  fillVerificationState FillVerificationState? @map("fill_verification_state")
+  fillVerificationReason String? @map("fill_verification_reason")
+  fillVerifiedAt DateTime? @map("fill_verified_at") @db.Timestamptz
 
   @@index([user])
   @@index([state])
@@ -190,6 +204,16 @@ model IntentAuditLog {
 
   @@index([intentId, timestamp(sort: Asc)], name: "audit_log_intent_idx")
   @@map("intent_audit_log")
+}
+
+model SignatureNonce {
+  signer    String @map("signer")
+  nonce     String @map("nonce")
+  expiresAt Int    @map("expires_at")
+
+  @@id([signer, nonce])
+  @@index([expiresAt])
+  @@map("signature_nonces")
 }
 
 // ─── Token ───────────────────────────────────────────────────────────────────

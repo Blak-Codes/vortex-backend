@@ -133,6 +133,7 @@ export interface IIntentsRepository {
     solver: string,
     newDeadline: number,
     now?: number,
+    acceptedDstAmount?: string,
   ): Intent | null | Promise<Intent | null>;
 
   /**
@@ -153,6 +154,9 @@ export interface IIntentsRepository {
     patch: Omit<Partial<Intent>, "state" | "solver">,
     now?: number,
   ): Intent | null | Promise<Intent | null>;
+
+  /** Atomically reserves one transaction hash for one accepted intent. */
+  reserveFillTxHash(id: string, solver: string, txHash: string): Intent | null | Promise<Intent | null>;
 
   /**
    * Atomically transition an intent from `open` → `cancelled` only if it is
@@ -312,14 +316,26 @@ export class InMemoryIntentsRepository implements IIntentsRepository {
     return this.store.delete(id);
   }
 
-  acceptIfOpen(id: string, solver: string, newDeadline: number, now?: number): Intent | null {
+  acceptIfOpen(
+    id: string,
+    solver: string,
+    newDeadline: number,
+    now?: number,
+    acceptedDstAmount?: string,
+  ): Intent | null {
     const existing = this.store.get(id);
     if (!existing || existing.state !== "open") return null;
     // Deadline predicate pushed into the atomic check (issue #473): a solver
     // racing the sweeper past expiry must lose even in-process.
     const nowSec = now ?? Math.floor(Date.now() / 1000);
     if (existing.deadline <= nowSec) return null;
-    const updated: Intent = { ...existing, state: "accepted", solver, deadline: newDeadline };
+    const updated: Intent = {
+      ...existing,
+      state: "accepted",
+      solver,
+      deadline: newDeadline,
+      ...(acceptedDstAmount !== undefined ? { acceptedDstAmount } : {}),
+    };
     this.store.set(id, updated);
     return updated;
   }
@@ -337,6 +353,21 @@ export class InMemoryIntentsRepository implements IIntentsRepository {
     const updated: Intent = { ...existing, ...patch, state: "filled" };
     this.store.set(id, updated);
     return updated;
+  }
+
+  reserveFillTxHash(id: string, solver: string, txHash: string): Intent | null {
+    const existing = this.store.get(id);
+    if (!existing || existing.state !== "accepted" || existing.solver !== solver) return null;
+    if (existing.txHash && existing.txHash !== txHash) return null;
+    if (this.findAll().some((intent) => intent.intentId !== id && intent.txHash === txHash)) return null;
+    const reserved = {
+      ...existing,
+      txHash,
+      fillVerificationState: "pending" as const,
+      fillVerificationReason: undefined,
+    };
+    this.store.set(id, reserved);
+    return reserved;
   }
 
   cancelIfOpen(id: string): Intent | null {
