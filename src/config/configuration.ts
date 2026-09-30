@@ -272,6 +272,8 @@ export interface AppConfig {
     /** Socket bufferedAmount above which further messages are queued instead of sent. */
     outboundBufferBytes: number;
     slowConsumerPolicy: "drop_oldest" | "disconnect";
+    /** Drain timeout for graceful shutdown (Activity 2). */
+    drainTimeoutMs: number;
   };
   /** HS256 secret for solver JWTs (SEP-10 auth, #442); empty disables JWT auth. */
   authJwtSecret: string;
@@ -434,6 +436,7 @@ export default (): AppConfig => ({
     outboundQueueMax: parseInt(process.env.WS_OUTBOUND_QUEUE_MAX ?? "1000", 10),
     outboundBufferBytes: parseInt(process.env.WS_OUTBOUND_BUFFER_BYTES ?? "1048576", 10),
     slowConsumerPolicy: (process.env.WS_SLOW_CONSUMER_POLICY ?? "drop_oldest") as AppConfig["ws"]["slowConsumerPolicy"],
+    drainTimeoutMs: parseInt(process.env.WS_DRAIN_TIMEOUT_MS ?? "25000", 10),
   },
   authJwtSecret: process.env.AUTH_JWT_SECRET ?? "",
   rateLimitLocalPruneMs: parseInt(process.env.RATE_LIMIT_LOCAL_PRUNE_MS ?? "60000", 10),
