@@ -769,6 +769,7 @@ export class IntentsGateway
       "intent_cancelled",
       "intent_expired",
       "intent_slashed",
+      "auction_price",
     ]);
 
     if (lookupTypes.has(event.type)) {

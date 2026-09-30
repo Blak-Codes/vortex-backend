@@ -99,6 +99,7 @@ export class PrismaIntentsRepository implements IIntentsRepository {
     solver: string,
     newDeadline: number,
     now?: number,
+    acceptedDstAmount?: string,
   ): Promise<Intent | null> {
     const nowSec = now ?? Math.floor(Date.now() / 1000);
     const result = await this.prisma.intent.updateMany({
@@ -107,6 +108,7 @@ export class PrismaIntentsRepository implements IIntentsRepository {
         state: PrismaIntentState.accepted,
         solver,
         deadline: newDeadline,
+        ...(acceptedDstAmount !== undefined ? { acceptedDstAmount } : {}),
       },
     });
 
@@ -292,6 +294,8 @@ export class PrismaIntentsRepository implements IIntentsRepository {
       srcAmount: intent.srcAmount,
       dstToken: intent.dstToken as unknown as Prisma.InputJsonValue,
       minDstAmount: intent.minDstAmount,
+      ...(intent.auction ? { auction: intent.auction as unknown as Prisma.InputJsonValue } : {}),
+      acceptedDstAmount: intent.acceptedDstAmount ?? null,
       quotedDstAmount: intent.quotedDstAmount ?? null,
       solver: intent.solver ?? null,
       state: this.toPrismaState(intent.state),
@@ -328,6 +332,14 @@ export class PrismaIntentsRepository implements IIntentsRepository {
     if (patch.quotedDstAmount !== undefined) data.quotedDstAmount = patch.quotedDstAmount;
     if (patch.srcAmount !== undefined) data.srcAmount = patch.srcAmount;
     if (patch.minDstAmount !== undefined) data.minDstAmount = patch.minDstAmount;
+    if (patch.auction !== undefined) {
+      (data as Prisma.IntentUpdateInput & { auction?: Prisma.InputJsonValue }).auction =
+        patch.auction as unknown as Prisma.InputJsonValue;
+    }
+    if (patch.acceptedDstAmount !== undefined) {
+      (data as Prisma.IntentUpdateInput & { acceptedDstAmount?: string | null }).acceptedDstAmount =
+        patch.acceptedDstAmount ?? null;
+    }
     if ("slashedAt" in patch && patch.slashedAt !== undefined) {
       // slashedAt / slashReason are not Prisma schema columns yet; ignore silently
       // until the schema migration lands (issue #62).
@@ -344,6 +356,8 @@ export class PrismaIntentsRepository implements IIntentsRepository {
     srcAmount: string;
     dstToken: Prisma.JsonValue;
     minDstAmount: string;
+    auction: Prisma.JsonValue | null;
+    acceptedDstAmount: string | null;
     quotedDstAmount: string | null;
     solver: string | null;
     state: PrismaIntentState;
@@ -365,6 +379,8 @@ export class PrismaIntentsRepository implements IIntentsRepository {
       srcAmount: row.srcAmount,
       dstToken: row.dstToken as unknown as StellarToken,
       minDstAmount: row.minDstAmount,
+      ...(row.auction !== null ? { auction: row.auction as unknown as Intent["auction"] } : {}),
+      ...(row.acceptedDstAmount !== null ? { acceptedDstAmount: row.acceptedDstAmount } : {}),
       ...(row.quotedDstAmount !== null ? { quotedDstAmount: row.quotedDstAmount } : {}),
       ...(row.solver !== null ? { solver: row.solver } : {}),
       state: row.state as IntentState,

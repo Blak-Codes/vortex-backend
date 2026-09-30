@@ -1,3 +1,5 @@
+import type { DutchAuction } from "../auctions/dutch";
+
 /**
  * Single source of truth for every chain the protocol recognises.
  * `SupportedChain` is derived from this tuple so all three consumers
@@ -88,6 +90,8 @@ export interface Intent {
   srcAmount: string; // bigint as string
   dstToken: StellarToken;
   minDstAmount: string;
+  auction?: DutchAuction;
+  acceptedDstAmount?: string;
   quotedDstAmount?: string; // best quote from solvers
   solver?: string;
   state: IntentState;

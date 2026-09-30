@@ -17,6 +17,9 @@ import { SorobanModule } from "../soroban/soroban.module";
 import { AppConfig } from "../config/configuration";
 import { PrismaService } from "../prisma/prisma.service";
 import { GovernanceModule } from "../governance/governance.module";
+import { SignatureNonceService } from "../common/signature-nonce.service";
+import { EvmSignatureVerifier } from "../common/evm-signature";
+import { AuctionTickerService } from "../auctions/auction-ticker.service";
 import { FillVerifierService } from "../soroban/fill-verifier.service";
 
 @Module({
@@ -31,6 +34,7 @@ import { FillVerifierService } from "../soroban/fill-verifier.service";
     RoutingModule,
     TokensModule,
     forwardRef(() => SorobanModule),
+    GovernanceModule,
   ],
   controllers: [IntentsController],
   providers: [
@@ -49,6 +53,9 @@ import { FillVerifierService } from "../soroban/fill-verifier.service";
       },
     },
     IntentsService,
+    SignatureNonceService,
+    EvmSignatureVerifier,
+    AuctionTickerService,
     FillVerifierService,
     IntentCapabilityIndex,
     backplaneProvider,

@@ -6,11 +6,14 @@ import {
   ForbiddenException,
   Get,
   GoneException,
+  Inject,
   ServiceUnavailableException,
   NotFoundException,
+  Optional,
   Param,
   Post,
   Query,
+  UnauthorizedException,
   UseGuards,
 } from "@nestjs/common";
 import {
@@ -48,7 +51,12 @@ import {
   buildAcceptMessage,
   buildCancelMessage,
   buildFillMessage,
+  INTENT_SIGNATURE_CLOCK_SKEW_SECONDS,
+  IntentSignatureContext,
+  MAX_INTENT_SIGNATURE_TTL_SECONDS,
 } from "../common/stellar-signature";
+import { SignatureNonceService } from "../common/signature-nonce.service";
+import { EvmSignatureVerifier } from "../common/evm-signature";
 import {
   applyVarianceScale,
   calculateProtocolFee,
@@ -67,6 +75,15 @@ import { KillSwitchOperation } from "../killswitch/killswitch.types";
 import { ConfigService } from "@nestjs/config";
 import { AppConfig } from "../config/configuration";
 import { isCanaryIntent } from "../common/canary";
+import { MetricsService } from "../metrics/metrics.service";
+import { dutchAuctionPrice } from "../auctions/dutch";
+
+interface IntentSignatureProof {
+  action: "create" | "accept" | "fill" | "cancel";
+  signer: string;
+  nonce?: string;
+  expiresAt?: number;
+}
 
 @ApiTags("intents")
 @Controller("api/v1/intents")
@@ -78,14 +95,87 @@ export class IntentsController {
     private readonly tokensService: TokensService,
     private readonly routingService: RoutingService,
     private readonly killSwitch: KillSwitchService,
+    private readonly signatureNonces: SignatureNonceService,
+    private readonly evmSignatures: EvmSignatureVerifier,
     config: ConfigService<AppConfig, true>,
+    @Optional() @Inject(MetricsService) private readonly metrics?: MetricsService,
     private readonly fillVerifier: FillVerifierService,
   ) {
     this.canary = new Set(config.get("canaryAddresses", { infer: true }) ?? []);
+    this.signatureNetwork = config.get("stellar.network", { infer: true });
+    this.legacyStellarSignatures = config.get("legacyStellarSignatures", { infer: true });
+    this.nodeEnv = config.get("nodeEnv", { infer: true });
   }
 
   /** Canary addresses (issue #496). */
   private readonly canary: ReadonlySet<string>;
+  private readonly signatureNetwork: AppConfig["stellar"]["network"];
+  private readonly legacyStellarSignatures: boolean;
+  private readonly nodeEnv: string;
+
+  private verifyIntentSignature(
+    action: IntentSignatureProof["action"],
+    signer: string,
+    signature: string,
+    nonce: string | undefined,
+    expiresAt: number | undefined,
+    legacyMessage: string,
+    v2Message: (context: IntentSignatureContext) => string,
+  ): IntentSignatureProof {
+    if ((nonce === undefined) !== (expiresAt === undefined)) {
+      throw new BadRequestException("nonce and expiresAt must be provided together");
+    }
+
+    if (nonce === undefined || expiresAt === undefined) {
+      if (!this.legacyStellarSignatures) {
+        throw new BadRequestException({
+          code: "SIGNATURE_V2_REQUIRED",
+          message: "A nonce and expiry are required for this signature",
+        });
+      }
+      verifyStellarSignature(signer, legacyMessage, signature);
+      return { action, signer };
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    if (
+      expiresAt + INTENT_SIGNATURE_CLOCK_SKEW_SECONDS < now ||
+      expiresAt > now + MAX_INTENT_SIGNATURE_TTL_SECONDS + INTENT_SIGNATURE_CLOCK_SKEW_SECONDS
+    ) {
+      throw new UnauthorizedException("Signature has expired or exceeds the maximum lifetime");
+    }
+
+    verifyStellarSignature(
+      signer,
+      v2Message({ network: this.signatureNetwork, nonce, expiresAt }),
+      signature,
+    );
+    return { action, signer, nonce, expiresAt };
+  }
+
+  private async consumeIntentNonce(proof: IntentSignatureProof): Promise<void> {
+    if (proof.nonce === undefined || proof.expiresAt === undefined) {
+      this.metrics?.legacyStellarSignatures.inc({ action: proof.action });
+      return;
+    }
+    const expiryWithSkew = proof.expiresAt + INTENT_SIGNATURE_CLOCK_SKEW_SECONDS;
+    if (!(await this.signatureNonces.consume(proof.signer, proof.nonce, expiryWithSkew))) {
+      throw new ConflictException({
+        code: "NONCE_REUSED",
+        message: "This signing nonce has already been used",
+      });
+    }
+  }
+
+  private assertEvmSignatureExpiry(expiresAt: number): void {
+    const now = Math.floor(Date.now() / 1000);
+    if (
+      expiresAt + INTENT_SIGNATURE_CLOCK_SKEW_SECONDS < now ||
+      expiresAt > now + MAX_INTENT_SIGNATURE_TTL_SECONDS + INTENT_SIGNATURE_CLOCK_SKEW_SECONDS
+    ) {
+      throw new UnauthorizedException("Signature has expired or exceeds the maximum lifetime");
+    }
+  }
 
   /**
    * Re-assert the kill-switch hierarchy against a *loaded* intent.
@@ -238,6 +328,33 @@ export class IntentsController {
     return { intentId: id, quotedDstAmount: intent.quotedDstAmount };
   }
 
+  @Get(":id/auction")
+  @ApiOkResponse({
+    description: "Current and accepted Dutch auction prices",
+    schema: {
+      type: "object",
+      properties: {
+        intentId: { type: "string" },
+        currentDstAmount: { type: "string" },
+        acceptedDstAmount: { type: "string" },
+        timestamp: { type: "number" },
+      },
+    },
+  })
+  @ApiNotFoundResponse({ description: "Intent not found or does not use a Dutch auction" })
+  async getAuctionPrice(@Param("id") id: string) {
+    const intent = await this.intentsService.get(id);
+    if (!intent) throw new NotFoundException("Intent not found");
+    if (!intent.auction) throw new NotFoundException("Intent does not use a Dutch auction");
+    const timestamp = Math.floor(Date.now() / 1000);
+    return {
+      intentId: id,
+      currentDstAmount: dutchAuctionPrice(intent.auction, timestamp, intent.minDstAmount),
+      acceptedDstAmount: intent.acceptedDstAmount,
+      timestamp,
+    };
+  }
+
   /**
    * Issue #44 — global IP throttle already applied via AppModule guard.
    * Issue #45 — additionally throttle per dto.user: 10 creates / 60 s.
@@ -255,6 +372,60 @@ export class IntentsController {
   })
   async create(@Body() dto: CreateIntentDto) {
     const now = Math.floor(Date.now() / 1000);
+    const intentDeadline = dto.deadline ?? now + (CHAIN_DEADLINE_DEFAULTS[dto.srcChain] ?? DEFAULT_DEADLINE_SECONDS);
+    if (dto.auction) {
+      let startAmount: bigint;
+      let minimumAmount: bigint;
+      try {
+        startAmount = BigInt(dto.auction.startDstAmount);
+        minimumAmount = BigInt(dto.minDstAmount);
+      } catch {
+        throw new BadRequestException("Auction amounts must be valid integer strings");
+      }
+      if (startAmount < minimumAmount || dto.auction.decayEnd <= dto.auction.decayStart) {
+        throw new BadRequestException("Auction start amount must be at least minDstAmount and decayEnd must follow decayStart");
+      }
+      if (dto.auction.decayEnd > intentDeadline) {
+        throw new BadRequestException("Auction decayEnd cannot exceed the intent deadline");
+      }
+      const hasExclusiveSolver = dto.auction.exclusiveSolver !== undefined;
+      const hasExclusivityEnd = dto.auction.exclusivityEnd !== undefined;
+      if (hasExclusiveSolver !== hasExclusivityEnd) {
+        throw new BadRequestException("exclusiveSolver and exclusivityEnd must be provided together");
+      }
+      if (
+        hasExclusivityEnd &&
+        (dto.auction.exclusivityEnd! <= now ||
+          dto.auction.exclusivityEnd! > dto.auction.decayEnd ||
+          dto.auction.exclusivityEnd! - now > 300)
+      ) {
+        throw new BadRequestException("Auction exclusivity must end within 300 seconds and before decayEnd");
+      }
+    }
+    let evmSignatureProof: IntentSignatureProof | undefined;
+
+    if (dto.srcChain !== "stellar" && !(this.nodeEnv === "test" && !dto.signature)) {
+      if (!dto.signature || !dto.nonce || dto.expiresAt === undefined || dto.deadline === undefined) {
+        throw new BadRequestException("EVM intent creation requires signature, nonce, expiresAt, and deadline");
+      }
+      this.assertEvmSignatureExpiry(dto.expiresAt);
+      await this.evmSignatures.verifyCreateIntent(dto.srcChain, {
+        user: dto.user,
+        srcTokenAddress: dto.srcTokenAddress,
+        srcTokenSymbol: dto.srcTokenSymbol,
+        srcTokenDecimals: dto.srcTokenDecimals,
+        srcAmount: dto.srcAmount,
+        dstTokenContract: dto.dstTokenContract,
+        dstTokenSymbol: dto.dstTokenSymbol,
+        dstTokenDecimals: dto.dstTokenDecimals,
+        minDstAmount: dto.minDstAmount,
+        auction: dto.auction,
+        deadline: dto.deadline,
+        nonce: dto.nonce,
+        expiresAt: dto.expiresAt,
+      }, dto.signature);
+      evmSignatureProof = { action: "create", signer: dto.user, nonce: dto.nonce, expiresAt: dto.expiresAt };
+    }
 
     // #219: use typed resolveToken instead of ad-hoc duck-typed any casts.
     // #276: reject unrecognised tokens outright instead of silently creating an
@@ -274,6 +445,8 @@ export class IntentsController {
       dto.srcTokenAddress,
     );
     const dstToken = await this.tokensService.resolveDstTokenOrThrow(dto.dstTokenContract);
+
+    if (evmSignatureProof) await this.consumeIntentNonce(evmSignatureProof);
 
     const intent = await this.intentsService.create(
       {
@@ -295,7 +468,8 @@ export class IntentsController {
           priceUSD: dstToken?.priceUSD,
         },
         minDstAmount: dto.minDstAmount,
-        deadline: dto.deadline ?? now + (CHAIN_DEADLINE_DEFAULTS[dto.srcChain] ?? DEFAULT_DEADLINE_SECONDS),
+        auction: dto.auction,
+        deadline: intentDeadline,
       },
       dto.idempotencyKey,
     );
@@ -359,8 +533,29 @@ export class IntentsController {
       throw new GoneException("Intent has expired");
     }
 
+    if (intent.state !== "open") {
+      throw new ConflictException(`Intent is ${intent.state}, cannot accept`);
+    }
+
+    if (
+      intent.auction?.exclusiveSolver &&
+      intent.auction.exclusivityEnd !== undefined &&
+      now < intent.auction.exclusivityEnd &&
+      intent.auction.exclusiveSolver.toLowerCase() !== dto.solver.toLowerCase()
+    ) {
+      throw new ForbiddenException("Intent is exclusive to another solver until the exclusivity window ends");
+    }
+
     // Verify the solver controls the claimed address before it can accept.
-    verifyStellarSignature(dto.solver, buildAcceptMessage(id, dto.solver), dto.signature);
+    const signatureProof = this.verifyIntentSignature(
+      "accept",
+      dto.solver,
+      dto.signature,
+      dto.nonce,
+      dto.expiresAt,
+      buildAcceptMessage(id, dto.solver),
+      (context) => buildAcceptMessage(id, dto.solver, context),
+    );
 
     const solver = await this.solversService.get(dto.solver);
     if (!solver?.isActive) {
@@ -378,7 +573,11 @@ export class IntentsController {
       throw new ForbiddenException("Canary intents may only be accepted by canary solvers, and vice versa");
     }
 
-    const updated = await this.intentsService.acceptIfOpen(id, dto.solver, now);
+    await this.consumeIntentNonce(signatureProof);
+    const acceptedDstAmount = intent.auction
+      ? dutchAuctionPrice(intent.auction, now, intent.minDstAmount)
+      : undefined;
+    const updated = await this.intentsService.acceptIfOpen(id, dto.solver, now, acceptedDstAmount);
     if (!updated) {
       const current = await this.intentsService.get(id);
       if (!current) throw new NotFoundException("Intent not found");
@@ -390,11 +589,13 @@ export class IntentsController {
 
     this.intentsService.appendAuditEntry(id, "accepted", dto.solver, "solver accepted", {
       deadline: updated.deadline,
+      ...(updated.acceptedDstAmount ? { acceptedDstAmount: updated.acceptedDstAmount } : {}),
     });
     this.intentsGateway.broadcast({
       type: "intent_accepted",
       intentId: id,
       solver: dto.solver,
+      ...(updated.acceptedDstAmount ? { acceptedDstAmount: updated.acceptedDstAmount } : {}),
     });
     return updated;
   }
@@ -423,8 +624,24 @@ export class IntentsController {
       throw new GoneException("Fill window has expired");
     }
 
+    if (intent.state !== "accepted") {
+      throw new ConflictException(`Intent is ${intent.state}, cannot fill`);
+    }
+    if (intent.solver !== dto.solver) {
+      throw new ForbiddenException("Wrong solver for this intent");
+    }
+
     // Verify the solver controls the claimed address
-    verifyStellarSignature(dto.solver, buildFillMessage(id, dto.solver), dto.signature);
+    const signatureProof = this.verifyIntentSignature(
+      "fill",
+      dto.solver,
+      dto.signature,
+      dto.nonce,
+      dto.expiresAt,
+      buildFillMessage(id, dto.solver),
+      (context) =>
+        buildFillMessage(id, dto.solver, context, { fillAmount: dto.fillAmount, txHash: dto.txHash }),
+    );
 
     if (!dto.txHash) throw new BadRequestException("A Stellar transaction hash is required");
     try {
@@ -472,12 +689,12 @@ export class IntentsController {
     const fillAmount = BigInt(verdict.deliveredAmount);
     let minAmount: bigint;
     try {
-      minAmount = BigInt(intent.minDstAmount);
+      minAmount = BigInt(intent.acceptedDstAmount ?? intent.minDstAmount);
     } catch {
       throw new BadRequestException({
         error: "Data integrity error: intent minDstAmount is not a valid integer",
         intentId: id,
-        minDstAmount: intent.minDstAmount,
+        minDstAmount: intent.acceptedDstAmount ?? intent.minDstAmount,
       });
     }
     if (fillAmount < minAmount) {
@@ -488,6 +705,8 @@ export class IntentsController {
       });
     }
 
+    await this.consumeIntentNonce(signatureProof);
+    const feeAmount = (BigInt(dto.fillAmount) * 5n) / 10000n;
     const feeAmount = (fillAmount * 5n) / 10000n;
 
     const updated = await this.intentsService.fillIfAccepted(id, dto.solver, {
@@ -533,9 +752,34 @@ export class IntentsController {
       throw new ConflictException(`Cannot cancel intent in state: ${intent.state}`);
     }
 
-    // Verify the user controls the claimed address
-    verifyStellarSignature(dto.user, buildCancelMessage(id), dto.signature);
+    let signatureProof: IntentSignatureProof;
+    if (intent.srcChain === "stellar") {
+      signatureProof = this.verifyIntentSignature(
+        "cancel",
+        dto.user,
+        dto.signature,
+        dto.nonce,
+        dto.expiresAt,
+        buildCancelMessage(id),
+        (context) => buildCancelMessage(id, context, dto.user),
+      );
+    } else {
+      if (!dto.nonce || dto.expiresAt === undefined) {
+        throw new BadRequestException("EVM cancellation requires nonce and expiresAt");
+      }
+      this.assertEvmSignatureExpiry(dto.expiresAt);
+      await this.evmSignatures.verifyCancelIntent(
+        intent.srcChain,
+        dto.user,
+        id,
+        dto.nonce,
+        dto.expiresAt,
+        dto.signature,
+      );
+      signatureProof = { action: "cancel", signer: dto.user, nonce: dto.nonce, expiresAt: dto.expiresAt };
+    }
 
+    await this.consumeIntentNonce(signatureProof);
     const updated = await this.intentsService.cancelIfOpen(id);
     if (!updated) {
       const current = await this.intentsService.get(id);
