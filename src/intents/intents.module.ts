@@ -20,6 +20,7 @@ import { GovernanceModule } from "../governance/governance.module";
 import { SignatureNonceService } from "../common/signature-nonce.service";
 import { EvmSignatureVerifier } from "../common/evm-signature";
 import { AuctionTickerService } from "../auctions/auction-ticker.service";
+import { FillVerifierService } from "../soroban/fill-verifier.service";
 
 @Module({
   // Both SolversModule and SorobanModule import IntentsModule back, so both
@@ -55,6 +56,7 @@ import { AuctionTickerService } from "../auctions/auction-ticker.service";
     SignatureNonceService,
     EvmSignatureVerifier,
     AuctionTickerService,
+    FillVerifierService,
     IntentCapabilityIndex,
     backplaneProvider,
     IntentsGateway,

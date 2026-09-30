@@ -575,6 +575,11 @@ export class IntentsService {
     return updated;
   }
 
+  /** Reserve a tx hash once, atomically, before external verification begins. */
+  async reserveFillTxHash(id: string, solver: string, txHash: string): Promise<Intent | null> {
+    return this.repo.reserveFillTxHash(id, solver, txHash);
+  }
+
   /** Shadow hook for `fill` — reported whether or not the conditional write won. */
   private observeFill(
     intentId: string,

@@ -7,6 +7,7 @@ import {
   Get,
   GoneException,
   Inject,
+  ServiceUnavailableException,
   NotFoundException,
   Optional,
   Param,
@@ -38,6 +39,7 @@ import { CreateIntentDto } from "./dto/create-intent.dto";
 import { CHAIN_DEADLINE_DEFAULTS, DEFAULT_DEADLINE_SECONDS } from "../config/configuration";
 import { AcceptIntentDto } from "./dto/accept-intent.dto";
 import { FillIntentDto } from "./dto/fill-intent.dto";
+import { FillVerifierService } from "../soroban/fill-verifier.service";
 import { CancelIntentDto } from "./dto/cancel-intent.dto";
 import { QuoteRequestDto } from "./dto/quote-request.dto";
 import { QuoteResponseDto } from "./dto/quote-response.dto";
@@ -97,6 +99,7 @@ export class IntentsController {
     private readonly evmSignatures: EvmSignatureVerifier,
     config: ConfigService<AppConfig, true>,
     @Optional() @Inject(MetricsService) private readonly metrics?: MetricsService,
+    private readonly fillVerifier: FillVerifierService,
   ) {
     this.canary = new Set(config.get("canaryAddresses", { infer: true }) ?? []);
     this.signatureNetwork = config.get("stellar.network", { infer: true });
@@ -640,7 +643,50 @@ export class IntentsController {
         buildFillMessage(id, dto.solver, context, { fillAmount: dto.fillAmount, txHash: dto.txHash }),
     );
 
-    const fillAmount = parseBaseUnits(dto.fillAmount);
+    if (!dto.txHash) throw new BadRequestException("A Stellar transaction hash is required");
+    try {
+      const reserved = await this.intentsService.reserveFillTxHash(id, dto.solver, dto.txHash);
+      if (!reserved) {
+        throw new ConflictException("Intent is not available for this fill or already has another transaction hash");
+      }
+    } catch (error) {
+      if ((error as { code?: string }).code === "P2002") {
+        throw new ConflictException("Transaction hash is already assigned to another intent");
+      }
+      throw error;
+    }
+    const verdict = await this.fillVerifier.verify(dto.txHash, intent);
+    if (verdict.status === "pending") {
+      await this.intentsService.update(id, {
+        fillVerificationState: "pending",
+        fillVerificationReason: verdict.reason,
+      });
+      throw new ServiceUnavailableException({
+        message: "Fill transaction is awaiting Horizon verification; retry with the same transaction hash",
+        verification: verdict.reason,
+      });
+    }
+    if (verdict.status === "rejected") {
+      await this.intentsService.update(id, {
+        fillVerificationState: "rejected",
+        fillVerificationReason: verdict.reason,
+        fillVerifiedAt: new Date().toISOString(),
+      });
+      await this.solversService.recordFailedFill(dto.solver, id);
+      this.intentsService.appendAuditEntry(id, "accepted", dto.solver, "fill verification rejected", {
+        txHash: dto.txHash,
+        reason: verdict.reason,
+      });
+      throw new BadRequestException({ message: "Fill transaction verification failed", reason: verdict.reason });
+    }
+
+    await this.intentsService.update(id, {
+      fillVerificationState: "verified",
+      fillVerificationReason: verdict.operation,
+      fillVerifiedAt: new Date().toISOString(),
+    });
+
+    const fillAmount = BigInt(verdict.deliveredAmount);
     let minAmount: bigint;
     try {
       minAmount = BigInt(intent.acceptedDstAmount ?? intent.minDstAmount);
@@ -661,10 +707,11 @@ export class IntentsController {
 
     await this.consumeIntentNonce(signatureProof);
     const feeAmount = (BigInt(dto.fillAmount) * 5n) / 10000n;
+    const feeAmount = (fillAmount * 5n) / 10000n;
 
     const updated = await this.intentsService.fillIfAccepted(id, dto.solver, {
       filledAt: now,
-      fillAmount: dto.fillAmount,
+      fillAmount: verdict.deliveredAmount,
       feeAmount: feeAmount.toString(),
       txHash: dto.txHash,
     });
@@ -679,14 +726,14 @@ export class IntentsController {
     await this.solversService.recordSuccessfulFill(dto.solver);
 
     this.intentsService.appendAuditEntry(id, "filled", dto.solver, "solver filled", {
-      fillAmount: dto.fillAmount,
+      fillAmount: verdict.deliveredAmount,
       txHash: dto.txHash,
     });
     this.intentsGateway.broadcast({
       type: "intent_filled",
       intentId: id,
       solver: dto.solver,
-      fillAmount: dto.fillAmount,
+      fillAmount: verdict.deliveredAmount,
     });
     return updated;
   }

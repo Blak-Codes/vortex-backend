@@ -23,6 +23,12 @@ enum IntentState {
   slashed
 }
 
+enum FillVerificationState {
+  pending
+  verified
+  rejected
+}
+
 enum SupportedChain {
   stellar
   ethereum
@@ -101,7 +107,10 @@ model Intent {
   /// Realized protocol fee charged on this fill (destination-token base units).
   feeAmount      String?     @map("fee_amount")
   /// On-chain transaction hash of the Stellar fill transaction.
-  txHash         String?     @map("tx_hash")
+  txHash         String?     @unique(map: "intents_tx_hash_key") @map("tx_hash")
+  fillVerificationState FillVerificationState? @map("fill_verification_state")
+  fillVerificationReason String? @map("fill_verification_reason")
+  fillVerifiedAt DateTime? @map("fill_verified_at") @db.Timestamptz
 
   @@index([user])
   @@index([state])
