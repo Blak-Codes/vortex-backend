@@ -6,6 +6,7 @@ import {
   ForbiddenException,
   Get,
   GoneException,
+  HttpCode,
   Inject,
   ServiceUnavailableException,
   NotFoundException,
@@ -202,13 +203,23 @@ export class IntentsController {
   }
 
   @Get()
-  @ApiBadRequestResponse({ description: "Invalid limit or offset" })
+  @ApiBadRequestResponse({ description: "Invalid limit, offset, or filter combination" })
   async list(@Query() dto: ListIntentsDto) {
-    let intents = await this.intentsService.getAll();
-
-    if (dto.state) intents = intents.filter((i) => i.state === dto.state);
-    if (dto.user) intents = intents.filter((i) => i.user.toLowerCase() === dto.user!.toLowerCase());
-    if (dto.chain) intents = intents.filter((i) => i.srcChain === dto.chain);
+    // Issue #440 — reject invalid range combinations with 400.
+    if (
+      dto.minAmountUsd !== undefined &&
+      dto.maxAmountUsd !== undefined &&
+      dto.minAmountUsd > dto.maxAmountUsd
+    ) {
+      throw new BadRequestException("minAmountUsd must not be greater than maxAmountUsd");
+    }
+    if (
+      dto.createdFrom !== undefined &&
+      dto.createdTo !== undefined &&
+      dto.createdFrom > dto.createdTo
+    ) {
+      throw new BadRequestException("createdFrom must not be greater than createdTo");
+    }
 
     const limit = Math.min(dto.limit ?? 20, 100);
     const offset = dto.offset ?? 0;
@@ -217,8 +228,22 @@ export class IntentsController {
       throw new BadRequestException("Limit exceeds maximum allowed value of 100");
     }
 
-    const page = intents.slice(offset, offset + limit);
-    return { intents: page, total: intents.length, limit, offset };
+    const { intents, total } = await this.intentsService.search({
+      state: dto.state,
+      user: dto.user,
+      chain: dto.chain,
+      minAmountUsd: dto.minAmountUsd,
+      maxAmountUsd: dto.maxAmountUsd,
+      createdFrom: dto.createdFrom,
+      createdTo: dto.createdTo,
+      srcToken: dto.srcToken,
+      dstToken: dto.dstToken,
+      solver: dto.solver,
+      sort: dto.sort,
+      limit,
+      offset,
+    });
+    return { intents, total, limit, offset };
   }
 
   @Get("open")
@@ -500,6 +525,9 @@ export class IntentsController {
   @ApiBadRequestResponse({
     description: "intentIds missing, not an array of strings, or exceeds 100 entries",
   })
+  // Read-only lookup: POST only because the ID list can exceed a query string,
+  // so the 201 that Nest infers for @Post would misreport it as a creation.
+  @HttpCode(200)
   async batchLookup(@Body() dto: BatchLookupDto) {
     const intents = await this.intentsService.getMany(dto.intentIds);
     return { intents, count: intents.length };

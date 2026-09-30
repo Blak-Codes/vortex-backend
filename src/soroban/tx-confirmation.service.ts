@@ -88,7 +88,7 @@ export class TxConfirmationService {
       }
 
       // FAILED
-      const errorDetail = (response as { resultXdr?: string }).resultXdr ?? "unknown";
+      const errorDetail = (response as unknown as { resultXdr?: string }).resultXdr ?? "unknown";
       this.logger.warn(
         `[tx-confirmation] FAILED hash=${hash} durationMs=${durationMs} detail=${errorDetail}`,
       );

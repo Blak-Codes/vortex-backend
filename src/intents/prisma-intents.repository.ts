@@ -1,6 +1,6 @@
 import { Injectable } from "@nestjs/common";
 import { PrismaService } from "../prisma/prisma.service";
-import { IIntentsRepository } from "./intents.repository";
+import { IIntentsRepository, IntentSearchQuery, IntentSearchResult } from "./intents.repository";
 import { Intent, IntentState, StellarToken, TokenInfo } from "./intents.types";
 import { IntentState as PrismaIntentState, Prisma } from "@prisma/client";
 
@@ -57,6 +57,79 @@ export class PrismaIntentsRepository implements IIntentsRepository {
       orderBy: { createdAt: "desc" },
     });
     return rows.map((r) => this.fromRow(r));
+  }
+
+  /**
+   * Advanced search (issue #440) — filtering, sorting and pagination pushed
+   * into the database query.
+   *
+   * Scalar filters use Prisma's typed where input; the JSONB token-symbol
+   * filters use raw SQL (`lower(token->>'symbol') = lower($1)`) so they can
+   * use the expression indexes created in the migration and stay
+   * case-insensitive. Sorting and pagination are applied in the same query so
+   * no supported combination falls back to a sequential scan + app-side slice.
+   */
+  async search(query: IntentSearchQuery): Promise<IntentSearchResult> {
+    const where: Prisma.IntentWhereInput = {};
+
+    if (query.state !== undefined) where.state = this.toPrismaState(query.state);
+    if (query.chain !== undefined) where.srcChain = query.chain as Prisma.IntentWhereInput["srcChain"];
+    if (query.user !== undefined) where.user = { equals: query.user, mode: "insensitive" };
+    if (query.solver !== undefined) where.solver = { equals: query.solver, mode: "insensitive" };
+
+    if (query.minAmountUsd !== undefined && query.maxAmountUsd !== undefined) {
+      where.usdValueAtCreate = { gte: query.minAmountUsd, lte: query.maxAmountUsd };
+    } else if (query.minAmountUsd !== undefined) {
+      where.usdValueAtCreate = { gte: query.minAmountUsd };
+    } else if (query.maxAmountUsd !== undefined) {
+      where.usdValueAtCreate = { lte: query.maxAmountUsd };
+    }
+
+    if (query.createdFrom !== undefined && query.createdTo !== undefined) {
+      where.createdAt = { gte: query.createdFrom, lte: query.createdTo };
+    } else if (query.createdFrom !== undefined) {
+      where.createdAt = { gte: query.createdFrom };
+    } else if (query.createdTo !== undefined) {
+      where.createdAt = { lte: query.createdTo };
+    }
+
+    // JSONB token-symbol filters — raw SQL so the expression indexes apply.
+    const raw: Prisma.Sql[] = [];
+    if (query.srcToken !== undefined) {
+      raw.push(Prisma.sql`lower(src_token->>'symbol') = lower(${query.srcToken})`);
+    }
+    if (query.dstToken !== undefined) {
+      raw.push(Prisma.sql`lower(dst_token->>'symbol') = lower(${query.dstToken})`);
+    }
+    if (raw.length > 0) {
+      (where as { AND: unknown }).AND = raw;
+    }
+
+    // Sorting — default createdAt desc (preserves pre-existing behaviour).
+    const [dimension, direction] = (query.sort ?? "created:desc").split(":");
+    const dir = direction === "asc" ? ("asc" as const) : ("desc" as const);
+    let orderBy: Prisma.IntentOrderByWithRelationInput;
+    switch (dimension) {
+      case "deadline":
+        orderBy = { deadline: dir };
+        break;
+      case "usd":
+        orderBy = { usdValueAtCreate: dir };
+        break;
+      case "created":
+      default:
+        orderBy = { createdAt: dir };
+    }
+
+    const offset = query.offset ?? 0;
+    const limit = query.limit ?? 20;
+
+    const [rows, total] = await Promise.all([
+      this.prisma.intent.findMany({ where, orderBy, skip: offset, take: limit }),
+      this.prisma.intent.count({ where }),
+    ]);
+
+    return { intents: rows.map((r) => this.fromRow(r)), total };
   }
 
   async update(id: string, patch: Partial<Intent>): Promise<Intent | null> {
@@ -304,6 +377,9 @@ export class PrismaIntentsRepository implements IIntentsRepository {
       filledAt: intent.filledAt ?? null,
       fillAmount: intent.fillAmount ?? null,
       txHash: intent.txHash ?? null,
+      ...(intent.usdValueAtCreate !== undefined
+        ? { usdValueAtCreate: intent.usdValueAtCreate }
+        : {}),
       fillVerificationState: intent.fillVerificationState ?? null,
       fillVerificationReason: intent.fillVerificationReason ?? null,
       fillVerifiedAt: intent.fillVerifiedAt ? new Date(intent.fillVerifiedAt) : null,
@@ -332,6 +408,7 @@ export class PrismaIntentsRepository implements IIntentsRepository {
     if (patch.quotedDstAmount !== undefined) data.quotedDstAmount = patch.quotedDstAmount;
     if (patch.srcAmount !== undefined) data.srcAmount = patch.srcAmount;
     if (patch.minDstAmount !== undefined) data.minDstAmount = patch.minDstAmount;
+    if (patch.usdValueAtCreate !== undefined) data.usdValueAtCreate = patch.usdValueAtCreate;
     if (patch.auction !== undefined) {
       (data as Prisma.IntentUpdateInput & { auction?: Prisma.InputJsonValue }).auction =
         patch.auction as unknown as Prisma.InputJsonValue;
@@ -367,6 +444,7 @@ export class PrismaIntentsRepository implements IIntentsRepository {
     fillAmount: string | null;
     feeAmount?: string | null;
     txHash: string | null;
+    usdValueAtCreate?: number | null;
     fillVerificationState?: "pending" | "verified" | "rejected" | null;
     fillVerificationReason?: string | null;
     fillVerifiedAt?: Date | null;
@@ -390,6 +468,9 @@ export class PrismaIntentsRepository implements IIntentsRepository {
       ...(row.fillAmount !== null ? { fillAmount: row.fillAmount } : {}),
       ...(row.feeAmount !== undefined && row.feeAmount !== null ? { feeAmount: row.feeAmount } : {}),
       ...(row.txHash !== null ? { txHash: row.txHash } : {}),
+      ...(row.usdValueAtCreate !== null && row.usdValueAtCreate !== undefined
+        ? { usdValueAtCreate: row.usdValueAtCreate }
+        : {}),
       ...(row.fillVerificationState ? { fillVerificationState: row.fillVerificationState } : {}),
       ...(row.fillVerificationReason ? { fillVerificationReason: row.fillVerificationReason } : {}),
       ...(row.fillVerifiedAt ? { fillVerifiedAt: row.fillVerifiedAt.toISOString() } : {}),
