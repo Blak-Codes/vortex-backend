@@ -97,6 +97,9 @@ export interface Intent {
   fillAmount?: string;
   feeAmount?: string; // realized protocol fee in dst token base units
   txHash?: string; // fill tx on Stellar
+  fillVerificationState?: "pending" | "verified" | "rejected";
+  fillVerificationReason?: string;
+  fillVerifiedAt?: string;
   slashedAt?: number;
   slashReason?: string;
   /**
