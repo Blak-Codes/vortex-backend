@@ -21,6 +21,7 @@ import { JobsModule } from "./jobs/jobs.module";
 import { FlagsModule } from "./flags/flags.module";
 import { GuardianStateModule } from "./governance/guardian-state.service";
 import { DatasetsModule } from "./datasets/datasets.module";
+import { AbuseModule } from "./abuse/abuse.module";
 import { ApiKeysModule } from "./auth/api-keys/api-keys.module";
 import { TieredThrottleGuard } from "./auth/rate-limit/tiered-throttle.guard";
 
@@ -60,6 +61,7 @@ import { TieredThrottleGuard } from "./auth/rate-limit/tiered-throttle.guard";
     JobsModule,
     FlagsModule,
     GuardianStateModule,
+    AbuseModule,
     HealthModule,
     TokensModule,
     IntentsModule,
