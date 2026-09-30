@@ -387,14 +387,16 @@ describe("IntentsService", () => {
       );
 
       const data = validCreateData();
-      const intent = await service.create(data);
+      const intent = await svc.create(data);
 
       expect(stellarTxService.invokeContract).toHaveBeenCalledTimes(1);
       const call = stellarTxService.invokeContract.mock.calls[0][0];
       expect(call.contractId).toBe(VALID_CONTRACT_ID);
       expect(call.method).toBe("create_intent");
 
-      // response shape is unchanged relative to the in-memory path
+      // Response shape: the in-memory and on-chain paths return the same keys.
+      // usdValueAtCreate (#440) and paramsVersion (#500) are both stamped by
+      // persistNewIntent, so they appear on every newly created intent.
       expect(Object.keys(intent).sort()).toEqual(
         Object.keys({
           intentId: "",
@@ -407,17 +409,17 @@ describe("IntentsService", () => {
           state: "",
           createdAt: 0,
           deadline: 0,
+          paramsVersion: 0,
+          usdValueAtCreate: 0,
         }).sort(),
       );
-      expect(await service.get(intent.intentId)).toBeDefined();
+      expect(await svc.get(intent.intentId)).toBeDefined();
     });
 
     it("rejects with a clear error and does not create the intent when SETTLEMENT_CONTRACT_ID is unset", async () => {
       const stellarTxService = fakeStellarTxService();
       const service = makeService({ onchainIntentsEnabled: true }, stellarTxService);
       const before = (await service.getAll()).length;
-      const svc = makeService({ onchainIntentsEnabled: true }, stellarTxService);
-      const before = (await svc.getAll()).length;
 
       await expect(service.create(validCreateData())).rejects.toMatchObject({
         message: expect.stringContaining("SETTLEMENT_CONTRACT_ID"),
@@ -433,10 +435,10 @@ describe("IntentsService", () => {
         { onchainIntentsEnabled: true, settlementContractId: VALID_CONTRACT_ID },
         stellarTxService,
       );
-      const before = (await service.getAll()).length;
+      const before = (await svc.getAll()).length;
 
-      await expect(service.create(validCreateData())).rejects.toThrow(/settlement contract/i);
-      expect(await service.getAll()).toHaveLength(before);
+      await expect(svc.create(validCreateData())).rejects.toThrow(/settlement contract/i);
+      expect(await svc.getAll()).toHaveLength(before);
     });
   });
 

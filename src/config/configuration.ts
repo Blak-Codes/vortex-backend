@@ -99,6 +99,7 @@ export interface AppConfig {
   nodeEnv: string;
   port: number;
   databaseUrl: string;
+  datasets: import("../datasets/datasets.types").DatasetsConfig;
   stellar: {
     network: "testnet" | "futurenet" | "mainnet";
     sorobanRpcUrl: string;
@@ -118,6 +119,14 @@ export interface AppConfig {
     address: string;
   };
   onchainIntentsEnabled: boolean;
+  legacyStellarSignatures: boolean;
+  evm: {
+    rpcAllowlist: string[];
+    chains: Record<
+      "ethereum" | "base" | "polygon" | "arbitrum" | "optimism" | "avalanche",
+      { chainId: number; rpcUrl: string; escrowAddress: string }
+    >;
+  };
   intentRetentionDays: number;
   intentRetentionSweepMs: number;
   /**
@@ -266,6 +275,29 @@ export interface AppConfig {
   };
   /** HS256 secret for solver JWTs (SEP-10 auth, #442); empty disables JWT auth. */
   authJwtSecret: string;
+  /**
+   * How often (ms) the local rate-limiter fallback prunes expired window
+   * entries (issue #441). Only relevant during a Redis outage.
+   */
+  rateLimitLocalPruneMs: number;
+  /**
+   * Redis URL backing the distributed rate limiter (issue #441). Empty means
+   * "local bounded limiter only" — the limit is still enforced, just per
+   * process. Defaults to `REDIS_URL` when that is set.
+   */
+  rateLimitRedisUrl: string;
+  /**
+   * Cross-replica transport for solver-credential revocation invalidation
+   * (issue #443): "memory" (single instance) or "redis" (pub/sub).
+   */
+  credentialRevocationPubsub: "memory" | "redis";
+  /** SSE intent feed (issue #433). */
+  sse: {
+    /** Heartbeat interval in milliseconds (SSE comment frames). */
+    heartbeatMs: number;
+    /** Maximum buffered output bytes per SSE client before it is disconnected. */
+    maxBufferBytes: number;
+  };
   /** Health probes (issue #492). */
   health: {
     /** Roles this process serves; readiness requires every indicator critical to any of them. */
@@ -303,6 +335,19 @@ export default (): AppConfig => ({
     address: process.env.TREASURY_ADDRESS ?? "",
   },
   onchainIntentsEnabled: (process.env.ONCHAIN_INTENTS_ENABLED ?? "false") === "true",
+  legacyStellarSignatures:
+    process.env.ALLOW_LEGACY_STELLAR_SIGNATURES === "true" || process.env.NODE_ENV === "test",
+  evm: {
+    rpcAllowlist: (process.env.EVM_RPC_ALLOWLIST ?? "").split(",").map((host) => host.trim()).filter(Boolean),
+    chains: {
+      ethereum: { chainId: 1, rpcUrl: process.env.ETHEREUM_RPC_URL ?? "", escrowAddress: process.env.ETHEREUM_ESCROW_ADDRESS ?? "" },
+      base: { chainId: 8453, rpcUrl: process.env.BASE_RPC_URL ?? "", escrowAddress: process.env.BASE_ESCROW_ADDRESS ?? "" },
+      polygon: { chainId: 137, rpcUrl: process.env.POLYGON_RPC_URL ?? "", escrowAddress: process.env.POLYGON_ESCROW_ADDRESS ?? "" },
+      arbitrum: { chainId: 42161, rpcUrl: process.env.ARBITRUM_RPC_URL ?? "", escrowAddress: process.env.ARBITRUM_ESCROW_ADDRESS ?? "" },
+      optimism: { chainId: 10, rpcUrl: process.env.OPTIMISM_RPC_URL ?? "", escrowAddress: process.env.OPTIMISM_ESCROW_ADDRESS ?? "" },
+      avalanche: { chainId: 43114, rpcUrl: process.env.AVALANCHE_RPC_URL ?? "", escrowAddress: process.env.AVALANCHE_ESCROW_ADDRESS ?? "" },
+    },
+  },
   intentRetentionDays: parseInt(process.env.INTENT_RETENTION_DAYS ?? "30", 10),
   intentRetentionSweepMs: parseInt(process.env.INTENT_RETENTION_SWEEP_MS ?? "60000", 10),
   // Default to dry-run (true) outside production; in production the value must
@@ -364,6 +409,16 @@ export default (): AppConfig => ({
     overrides: process.env.FLAG_OVERRIDES ?? "",
   },
   adminApiKeys: process.env.ADMIN_API_KEYS ?? "",
+  datasets: {
+    enabled: (process.env.DATASETS_ENABLED ?? "false") === "true",
+    anonymize: (process.env.DATASETS_ANONYMIZE ?? "true") === "true",
+    salt: process.env.DATASETS_SALT ?? "",
+    saltRotationHours: parseInt(process.env.DATASETS_SALT_ROTATION_HOURS ?? "24", 10),
+    saltRetentionWindows: parseInt(process.env.DATASETS_SALT_RETENTION_WINDOWS ?? "2", 10),
+    publicBucket: process.env.DATASETS_PUBLIC_BUCKET ?? "",
+    storageKind: (process.env.DATASETS_STORAGE_KIND ?? "memory") as "local" | "memory",
+    localDir: process.env.DATASETS_LOCAL_DIR ?? "",
+  },
   guardianContractId: process.env.GUARDIAN_CONTRACT_ID ?? "",
   canaryAddresses: (process.env.CANARY_ADDRESSES ?? "")
     .split(",")
@@ -381,6 +436,16 @@ export default (): AppConfig => ({
     slowConsumerPolicy: (process.env.WS_SLOW_CONSUMER_POLICY ?? "drop_oldest") as AppConfig["ws"]["slowConsumerPolicy"],
   },
   authJwtSecret: process.env.AUTH_JWT_SECRET ?? "",
+  rateLimitLocalPruneMs: parseInt(process.env.RATE_LIMIT_LOCAL_PRUNE_MS ?? "60000", 10),
+  // Redis URL for the distributed rate limiter. Defaults to REDIS_URL so an
+  // existing multi-replica deployment keeps a global quota; set it explicitly
+  // to "" to force the bounded local limiter (single-replica / test).
+  rateLimitRedisUrl: process.env.RATE_LIMIT_REDIS_URL ?? process.env.REDIS_URL ?? "",
+  credentialRevocationPubsub: (process.env.CREDENTIAL_REVOCATION_PUBSUB ?? "memory") as "memory" | "redis",
+  sse: {
+    heartbeatMs: parseInt(process.env.SSE_HEARTBEAT_MS ?? "15000", 10),
+    maxBufferBytes: parseInt(process.env.SSE_MAX_BUFFER_BYTES ?? "1048576", 10),
+  },
   health: {
     roles: (process.env.SERVICE_ROLES ?? "api,ws,worker")
       .split(",")

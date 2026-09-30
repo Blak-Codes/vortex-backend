@@ -1,9 +1,13 @@
-import { Module } from "@nestjs/common";
+import { Module, forwardRef } from "@nestjs/common";
 import { ProtocolParamsService } from "./params.service";
 import { ParamsController } from "./params.controller";
 import { SorobanModule } from "../soroban/soroban.module";
 import { GuardianController } from "./guardian.controller";
 import { GuardianService } from "./guardian.service";
+
+// GovernanceModule → SorobanModule → IntentsModule → GovernanceModule forms a
+// cycle; the SorobanModule edge must be deferred so the import resolves after
+// SorobanModule has finished loading.
 
 /**
  * Governance module — exposes protocol parameters sourced from the on-chain
@@ -14,7 +18,7 @@ import { GuardianService } from "./guardian.service";
  * inject it to snapshot parameters at intent-creation time.
  */
 @Module({
-  imports: [SorobanModule],
+  imports: [forwardRef(() => SorobanModule)],
   controllers: [ParamsController, GuardianController],
   providers: [ProtocolParamsService, GuardianService],
   exports: [ProtocolParamsService, GuardianService],
